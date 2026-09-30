@@ -1,0 +1,28 @@
+# Secrets and personal data — never commit
+.env
+.env.*
+!.env.example
+private/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Web
+web/node_modules/
+web/.next/
+web/out/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
