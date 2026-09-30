@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from aijobradar.config import AppConfig, load_config, to_sqlalchemy_url
 
 
@@ -24,3 +27,18 @@ def test_empty_config_uses_defaults(tmp_path: Path) -> None:
     path = tmp_path / "empty.yaml"
     path.write_text("")
     assert load_config(path) == AppConfig()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"himalayas": {"max_page": 3}},
+        {"jobicy": {"cout": 5}},
+        {"wwr": {"feed": []}},
+        {"dedup": {"title_similarty": 90}},
+        {"dedupe": {}},
+    ],
+)
+def test_unknown_config_keys_are_rejected(raw: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(raw)

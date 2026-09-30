@@ -1,9 +1,11 @@
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from aijobradar.models import RawJob, SourceResult, SourceStatus
 
@@ -44,6 +46,18 @@ def describe_error(exc: BaseException) -> tuple[str, int | None]:
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code}", exc.response.status_code
     return f"{type(exc).__name__}: {exc}"[:500], None
+
+
+def describe_record_error(exc: BaseException) -> str:
+    """One line, safe for public logs: no input values (they belong to third parties)."""
+    if isinstance(exc, ValidationError):
+        fields = "; ".join(
+            f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in exc.errors(include_input=False)
+        )
+        text = f"{type(exc).__name__}: {fields}"
+    else:
+        text = f"{type(exc).__name__}: {exc}"
+    return re.sub(r"\s*\n\s*", " ", text)[:300]
 
 
 def fetch_feeds(
@@ -104,7 +118,7 @@ def run_adapter(adapter: Adapter, client: httpx.Client) -> SourceResult:
             job = adapter.parse_record(record)
         except Exception as exc:  # one bad record must not sink the source
             invalid += 1
-            first_invalid = first_invalid or f"{type(exc).__name__}: {exc}"[:300]
+            first_invalid = first_invalid or describe_record_error(exc)
             continue
         if job is None:
             out_of_scope += 1

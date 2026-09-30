@@ -27,7 +27,9 @@ def fetch(
     with (
         make_client(settings.user_agent, settings.http_timeout_s) as client,
         Session(engine) as session,
-        session.begin(),  # a failed run is still committed: its statuses are the evidence
+        # A failed run is still committed: its statuses are the evidence. The connection is
+        # acquired lazily, so it is first used after run_fetch has finished all network I/O.
+        session.begin(),
     ):
         report = run_fetch(
             session, build_adapters(cfg), client, now=datetime.now(UTC), dedup_cfg=cfg.dedup

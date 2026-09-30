@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
 
 class HimalayasConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = True
     max_pages: int = 10
     lookback_days: int = 3
@@ -33,12 +35,16 @@ class HimalayasConfig(BaseModel):
 
 
 class JobicyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = True
     count: int = 50
     industries: list[str] = Field(default_factory=lambda: ["engineering"])
 
 
 class WwrConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = True
     feeds: list[str] = Field(
         default_factory=lambda: [
@@ -50,11 +56,15 @@ class WwrConfig(BaseModel):
 
 
 class DedupConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title_similarity: int = 92  # rapidfuzz token_sort_ratio threshold
     match_window_days: int = 60  # also covers reposts
 
 
 class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     himalayas: HimalayasConfig = Field(default_factory=HimalayasConfig)
     jobicy: JobicyConfig = Field(default_factory=JobicyConfig)
     wwr: WwrConfig = Field(default_factory=WwrConfig)

@@ -1,7 +1,18 @@
-from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+
+MAX_CURRENCY_LEN = 8  # width of jobs.salary_currency
+
+
+def _strip_nul(value: Any) -> Any:
+    """Postgres text cannot hold NUL; drop it from strings and from lists of strings."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_nul(item) for item in value]
+    return value
 
 
 class SourceStatus(StrEnum):
@@ -38,9 +49,20 @@ class RawJob(BaseModel):
     salary_max: float | None = None
     salary_currency: str | None = None
     salary_period: SalaryPeriod | None = None
-    posted_at: datetime | None = None
+    posted_at: AwareDatetime | None = None
     description_html: str = ""
     tags: list[str] = Field(default_factory=list)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _drop_nul(cls, value: Any) -> Any:
+        return _strip_nul(value)
+
+    @field_validator("salary_currency")
+    @classmethod
+    def _currency_fits_column(cls, value: str | None) -> str | None:
+        # An over-long code is not worth losing the job over: keep the job, drop the code.
+        return value if value is None or len(value) <= MAX_CURRENCY_LEN else None
 
 
 class SourceResult(BaseModel):
@@ -52,3 +74,4 @@ class SourceResult(BaseModel):
     duration_ms: int = 0
     invalid_items: int = 0  # records that failed parsing/validation
     out_of_scope: int = 0  # records dropped by the source's own scope filter (e.g. category)
+    ingest_errors: int = 0  # valid records the database rejected; set by the pipeline, not adapters

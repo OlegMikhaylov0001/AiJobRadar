@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from aijobradar.db.models import Job, JobSource, Run, SourceRun
@@ -101,7 +101,27 @@ def insert_job(session: Session, job: NormalizedJob, run_id: uuid.UUID, now: dat
     return row
 
 
+def _widen_locations(current: list[str], incoming: list[str]) -> list[str]:
+    """[] means "no stated restriction" and wins; otherwise the sorted union."""
+    if not current or not incoming:
+        return []
+    return sorted(set(current) | set(incoming))
+
+
+def _widen_timezones(
+    current: list[float] | None, incoming: list[float] | None
+) -> list[float] | None:
+    """None means "no stated restriction" and wins; otherwise the sorted union."""
+    if current is None or incoming is None:
+        return None
+    return sorted(set(current) | set(incoming))
+
+
 def attach_source(session: Session, job_id: uuid.UUID, raw: RawJob, now: datetime) -> None:
+    """Link another source record to an existing job and widen the job's geo to cover it."""
+    geo = session.execute(
+        select(Job.location_restrictions, Job.timezone_restrictions).where(Job.id == job_id)
+    ).one()
     session.add(
         JobSource(
             job_id=job_id,
@@ -112,11 +132,27 @@ def attach_source(session: Session, job_id: uuid.UUID, raw: RawJob, now: datetim
             last_seen_at=now,
         )
     )
-    session.execute(update(Job).where(Job.id == job_id).values(last_seen_at=now))
+    session.execute(
+        update(Job)
+        .where(Job.id == job_id)
+        .values(
+            last_seen_at=func.greatest(Job.last_seen_at, now),
+            location_restrictions=_widen_locations(
+                geo.location_restrictions, raw.location_restrictions
+            ),
+            timezone_restrictions=_widen_timezones(
+                geo.timezone_restrictions, raw.timezone_restrictions
+            ),
+        )
+    )
     session.flush()
 
 
 def touch_source(session: Session, link: JobSource, now: datetime) -> None:
     link.last_seen_at = now
-    session.execute(update(Job).where(Job.id == link.job_id).values(last_seen_at=now))
+    session.execute(
+        update(Job)
+        .where(Job.id == link.job_id)
+        .values(last_seen_at=func.greatest(Job.last_seen_at, now))
+    )
     session.flush()

@@ -16,7 +16,14 @@ CFG = DedupConfig()
 
 
 def _raw(
-    source: str, sid: str, title: str, company: str = "Initech", url: str | None = None
+    source: str,
+    sid: str,
+    title: str,
+    company: str = "Initech",
+    url: str | None = None,
+    *,
+    locations: list[str] | None = None,
+    timezones: list[float] | None = None,
 ) -> RawJob:
     return RawJob(
         source=source,
@@ -25,6 +32,8 @@ def _raw(
         title=title,
         company=company,
         description_html="<p>x</p>",
+        location_restrictions=locations or [],
+        timezone_restrictions=timezones,
     )
 
 
@@ -100,3 +109,44 @@ def test_titles_differing_only_in_parenthesized_stack_are_not_merged(session: Se
     assert _ingest(session, first) is DedupOutcome.NEW
     assert _ingest(session, second) is DedupOutcome.NEW
     assert _count(session, Job) == 2
+
+
+def _job(session: Session) -> Job:
+    session.expire_all()
+    return session.scalars(select(Job)).one()
+
+
+def test_merge_widens_locations_to_sorted_union(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Backend Engineer", locations=["United States"]))
+    outcome = _ingest(
+        session, _raw("himalayas", "2", "Backend Engineer", locations=["United Kingdom"])
+    )
+    assert outcome is DedupOutcome.MERGED
+    assert _job(session).location_restrictions == ["United Kingdom", "United States"]
+
+
+def test_merge_with_unrestricted_variant_makes_job_unrestricted(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Backend Engineer", locations=["United States"]))
+    _ingest(session, _raw("himalayas", "2", "Backend Engineer", locations=[]))
+    assert _job(session).location_restrictions == []
+    _ingest(session, _raw("himalayas", "3", "Backend Engineer", locations=["Germany"]))
+    assert _job(session).location_restrictions == []
+
+
+def test_merge_timezones_union_and_none_wins(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Backend Engineer", timezones=[2.0, 1.0]))
+    _ingest(session, _raw("himalayas", "2", "Backend Engineer", timezones=[3.0, 1.0]))
+    assert _job(session).timezone_restrictions == [1.0, 2.0, 3.0]
+    _ingest(session, _raw("himalayas", "3", "Backend Engineer", timezones=None))
+    assert _job(session).timezone_restrictions is None
+    _ingest(session, _raw("himalayas", "4", "Backend Engineer", timezones=[5.0]))
+    assert _job(session).timezone_restrictions is None
+
+
+def test_last_seen_never_moves_backwards(session: Session) -> None:
+    later = NOW + timedelta(days=2)
+    _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), later)
+    _ingest(session, _raw("wwr", "x", "Full Stack Engineer"), NOW)  # merge with an older clock
+    assert _job(session).last_seen_at == later
+    _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), NOW)  # seen with an older clock
+    assert _job(session).last_seen_at == later

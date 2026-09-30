@@ -38,6 +38,18 @@ class FakeAdapter:
             raise ValueError("broken record")
         if record == "skip":
             return None
+        if record == "invalid":
+            return RawJob.model_validate(
+                {
+                    "source": "fake",
+                    "source_job_id": "9",
+                    "source_url": "https://x/9",
+                    "title": "T",
+                    "company": ["leaky-third-party-value"],
+                }
+            )
+        if record == "multiline":
+            raise ValueError("first line\nsecond line")
         return _job(int(record))
 
 
@@ -57,6 +69,20 @@ def test_degraded_when_invalid_share_above_threshold() -> None:
     assert result.status is SourceStatus.DEGRADED
     assert result.error is not None and "2/3 invalid" in result.error
     assert "broken record" in result.error
+
+
+def test_validation_error_is_summarized_without_input_values() -> None:
+    result = _run(FakeAdapter(records=["1", "invalid", "invalid"]))
+    assert result.status is SourceStatus.DEGRADED and result.error is not None
+    assert "company" in result.error and "type" in result.error
+    assert "leaky-third-party-value" not in result.error
+    assert "\n" not in result.error
+
+
+def test_invalid_record_error_is_one_line() -> None:
+    result = _run(FakeAdapter(records=["multiline", "multiline"]))
+    assert result.error is not None and "\n" not in result.error
+    assert "first line second line" in result.error
 
 
 def test_empty_when_no_records() -> None:

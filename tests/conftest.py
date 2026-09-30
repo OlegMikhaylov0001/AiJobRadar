@@ -24,7 +24,8 @@ def fixture_path(*parts: str) -> Path:
 def engine() -> Iterator[Engine]:
     # The schema is dropped below: refuse anything that is not an explicit test database.
     if not (make_url(TEST_DATABASE_URL).database or "").endswith("_test"):
-        pytest.fail(f"TEST_DATABASE_URL must point to a *_test database, got {TEST_DATABASE_URL}")
+        shown = make_url(TEST_DATABASE_URL).render_as_string(hide_password=True)
+        pytest.fail(f"TEST_DATABASE_URL must point to a *_test database, got {shown}")
     eng = create_engine(TEST_DATABASE_URL)
     try:
         with eng.begin() as conn:

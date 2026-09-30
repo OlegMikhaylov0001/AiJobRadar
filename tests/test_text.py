@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -81,3 +83,38 @@ def test_raw_job_strips_and_rejects_empty_title() -> None:
     assert (job.title, job.company) == ("T", "C")
     with pytest.raises(ValidationError):
         RawJob(source="s", source_job_id="1", source_url="https://x", title="  ", company="C")
+
+
+def test_raw_job_strips_nul_from_every_string_field() -> None:
+    job = RawJob(
+        source="s",
+        source_job_id="1\x002",
+        source_url="https://x/\x00",
+        title="Dev\x00 Ops",
+        company="Ac\x00me",
+        description_html="<p>a\x00b</p>",
+        tags=["py\x00thon", "go"],
+        location_restrictions=["Uni\x00ted States"],
+    )
+    assert (job.source_job_id, job.title, job.company) == ("12", "Dev Ops", "Acme")
+    assert (job.source_url, job.description_html) == ("https://x/", "<p>ab</p>")
+    assert (job.tags, job.location_restrictions) == (["python", "go"], ["United States"])
+
+
+def test_raw_job_nulls_over_long_currency_instead_of_failing() -> None:
+    base = {"source": "s", "source_job_id": "1", "source_url": "https://x", "title": "T"}
+    long = RawJob(**base, company="C", salary_currency="US DOLLARS")
+    assert long.salary_currency is None
+    assert RawJob(**base, company="C", salary_currency="USD").salary_currency == "USD"
+
+
+def test_raw_job_rejects_naive_posted_at() -> None:
+    with pytest.raises(ValidationError):
+        RawJob(
+            source="s",
+            source_job_id="1",
+            source_url="https://x",
+            title="T",
+            company="C",
+            posted_at=datetime(2026, 9, 1),
+        )
