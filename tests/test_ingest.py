@@ -86,3 +86,8 @@ def test_different_seniority_is_a_new_job(session: Session) -> None:
 def test_match_outside_window_is_new(session: Session) -> None:
     _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), NOW - timedelta(days=61))
     assert _ingest(session, _raw("wwr", "x", "Full Stack Engineer")) is DedupOutcome.NEW
+
+
+def test_match_inside_window_is_merged(session: Session) -> None:
+    _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), NOW - timedelta(days=59))
+    assert _ingest(session, _raw("wwr", "x", "Full Stack Engineer")) is DedupOutcome.MERGED

@@ -55,15 +55,18 @@ def find_source(session: Session, source: str, source_job_id: str) -> JobSource 
 
 def find_job_id_by_url(session: Session, url: str, since: datetime) -> uuid.UUID | None:
     return session.scalars(
-        select(Job.id).where(Job.apply_url_canonical == url, Job.last_seen_at >= since).limit(1)
+        select(Job.id)
+        .where(Job.apply_url_canonical == url, Job.last_seen_at >= since)
+        .order_by(Job.first_seen_at, Job.id)
+        .limit(1)
     ).first()
 
 
 def company_candidates(session: Session, company_norm: str, since: datetime) -> list[Candidate]:
     rows = session.execute(
-        select(Job.id, Job.title_norm).where(
-            Job.company_norm == company_norm, Job.last_seen_at >= since
-        )
+        select(Job.id, Job.title_norm)
+        .where(Job.company_norm == company_norm, Job.last_seen_at >= since)
+        .order_by(Job.first_seen_at, Job.id)
     ).all()
     return [Candidate(job_id=row.id, title_norm=row.title_norm) for row in rows]
 

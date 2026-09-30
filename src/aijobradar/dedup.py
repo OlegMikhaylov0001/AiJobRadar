@@ -12,10 +12,22 @@ class DedupOutcome(StrEnum):
     NEW = "new"
 
 
+_ROMAN_NUMERALS = frozenset({"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"})
+
+
 @dataclass(frozen=True)
 class Candidate:
     job_id: uuid.UUID
     title_norm: str
+
+
+def _markers(title_norm: str) -> frozenset[str]:
+    # Level/region markers (ii, 3, us) barely move the fuzzy score but make a different role.
+    return frozenset(
+        token
+        for token in title_norm.split()
+        if token.isdigit() or token in _ROMAN_NUMERALS or (token.isalpha() and len(token) == 2)
+    )
 
 
 def best_fuzzy_match(
@@ -25,7 +37,10 @@ def best_fuzzy_match(
     # "senior backend engineer" as 100 and would merge different seniority levels.
     best: Candidate | None = None
     best_score = -1.0
+    markers = _markers(title_norm)
     for candidate in candidates:
+        if _markers(candidate.title_norm) != markers:
+            continue
         score = fuzz.token_sort_ratio(title_norm, candidate.title_norm)
         if score >= threshold and score > best_score:
             best, best_score = candidate, score
