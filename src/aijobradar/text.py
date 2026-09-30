@@ -30,7 +30,11 @@ _LEGAL_SUFFIXES = frozenset(
         "зао",
     }
 )
-_BRACKETED = re.compile(r"\([^)]*\)|\[[^\]]*\]")
+# Only gender tags are dropped; other parenthesized content (often the stack) is kept, since
+# stripping it would merge different vacancies and silently drop one.
+_GENDER_TAG = re.compile(
+    r"[(\[]\s*(?:[mwfdx]\s*/\s*){1,3}[mwfdx]\s*[)\]]|\[gn\]|\(all genders\)", re.IGNORECASE
+)
 _TITLE_NOISE = re.compile(r"\b(?:remote|wfh)\b")
 # Same compound word written apart/hyphenated must compare equal ("full stack" == "fullstack").
 _COMPOUNDS = re.compile(r"\b(full|back|front)[\s-]+(stack|end)\b")
@@ -60,7 +64,7 @@ def normalize_company(name: str) -> str:
 
 def normalize_title(title: str) -> str:
     s = unicodedata.normalize("NFKC", title).casefold()
-    s = _BRACKETED.sub(" ", s)
+    s = _GENDER_TAG.sub(" ", s)
     s = _COMPOUNDS.sub(lambda m: m.group(1) + m.group(2), s)
     s = _TITLE_NOISE.sub(" ", s)
     s = re.sub(r"[^\w\s+#]", " ", s)  # keep c++ / c#

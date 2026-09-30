@@ -91,3 +91,12 @@ def test_match_outside_window_is_new(session: Session) -> None:
 def test_match_inside_window_is_merged(session: Session) -> None:
     _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), NOW - timedelta(days=59))
     assert _ingest(session, _raw("wwr", "x", "Full Stack Engineer")) is DedupOutcome.MERGED
+
+
+def test_titles_differing_only_in_parenthesized_stack_are_not_merged(session: Session) -> None:
+    company = "Acme Staffing AB"
+    first = _raw("wwr", "1", "Senior Backend Developer (Node.js / Nest.js)", company)
+    second = _raw("wwr", "2", "Senior Backend Developer (Python)", company)
+    assert _ingest(session, first) is DedupOutcome.NEW
+    assert _ingest(session, second) is DedupOutcome.NEW
+    assert _count(session, Job) == 2

@@ -44,11 +44,16 @@ def test_normalize_company(raw: str, expected: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("Senior Full-Stack Engineer (React/Node)", "senior fullstack engineer"),
+        ("Senior Full-Stack Engineer (React/Node)", "senior fullstack engineer react node"),
         ("Senior Full Stack Engineer", "senior fullstack engineer"),
         ("Back-end Developer - Remote, US", "backend developer us"),
         ("AI Augmented Software Engineer [gn]", "ai augmented software engineer"),
         ("C++ / C# Engineer", "c++ c# engineer"),
+        ("Backend Engineer (m/w/d)", "backend engineer"),
+        (
+            "Senior Backend Developer (Node.js / Nest.js)",
+            "senior backend developer node js nest js",
+        ),
     ],
 )
 def test_normalize_title(raw: str, expected: str) -> None:

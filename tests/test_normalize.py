@@ -18,7 +18,7 @@ def _raw(**overrides: object) -> RawJob:
 def test_normalize_fills_derived_fields() -> None:
     job = normalize(_raw())
     assert job.company_norm == "umbrella billing"
-    assert job.title_norm == "senior fullstack engineer"
+    assert job.title_norm == "senior fullstack engineer react node"
     assert job.description_text == "Invoices & contracts."
     assert job.apply_url_canonical == "https://jobicy.com/jobs/1-x"
     assert len(job.content_hash) == 64
