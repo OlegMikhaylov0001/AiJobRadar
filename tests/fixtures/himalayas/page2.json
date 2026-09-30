@@ -1,0 +1,32 @@
+{
+  "comments": "synthetic fixture for tests",
+  "updatedAt": 1790640000,
+  "offset": 20,
+  "limit": 20,
+  "totalCount": 6,
+  "nextCursor": null,
+  "jobs": [
+    {
+      "title": "Full Stack Engineer",
+      "excerpt": "Ship features.",
+      "companyName": "Initech",
+      "companySlug": "initech",
+      "companyLogo": "",
+      "employmentType": "Full Time",
+      "minSalary": null,
+      "maxSalary": null,
+      "salaryPeriod": "annual",
+      "seniority": ["Mid-level"],
+      "currency": null,
+      "locationRestrictions": ["United Kingdom"],
+      "timezoneRestrictions": [0],
+      "categories": ["Full-Stack-Engineer"],
+      "parentCategories": ["Developer"],
+      "description": "<p>React and Node.</p>",
+      "pubDate": 1790640000,
+      "expiryDate": 1793232000,
+      "applicationLink": "https://himalayas.app/companies/initech/jobs/full-stack-engineer-2002",
+      "guid": "https://himalayas.app/companies/initech/jobs/full-stack-engineer-2002"
+    }
+  ]
+}
