@@ -13,5 +13,9 @@ def fetch() -> None:
 
 @db_app.command("upgrade")
 def db_upgrade() -> None:
-    """Apply database migrations."""
-    raise typer.Exit(2)  # wired up in Task 8
+    """Apply database migrations to DATABASE_URL."""
+    from aijobradar.config import Settings
+    from aijobradar.db.migrate import upgrade
+
+    upgrade(Settings().sqlalchemy_url)
+    typer.echo("Миграции применены.")
