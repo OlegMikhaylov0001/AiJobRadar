@@ -7,11 +7,12 @@ from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from aijobradar.config import to_sqlalchemy_url
 from aijobradar.db.migrate import upgrade
 
 FIXTURES = Path(__file__).parent / "fixtures"
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql+psycopg://localhost/aijobradar_test"
+TEST_DATABASE_URL = to_sqlalchemy_url(
+    os.environ.get("TEST_DATABASE_URL", "postgresql+psycopg://localhost/aijobradar_test")
 )
 
 

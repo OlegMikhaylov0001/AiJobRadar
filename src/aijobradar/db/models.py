@@ -58,7 +58,7 @@ class Job(Base):
     title_norm: Mapped[str] = mapped_column(Text)
     location_text: Mapped[str | None] = mapped_column(Text)
     location_restrictions: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    timezone_restrictions: Mapped[list[float] | None] = mapped_column(JSONB)
+    timezone_restrictions: Mapped[list[float] | None] = mapped_column(JSONB(none_as_null=True))
     employment_type: Mapped[str | None] = mapped_column(Text)
     seniority: Mapped[str | None] = mapped_column(Text)
     salary_min: Mapped[float | None] = mapped_column(Float)
