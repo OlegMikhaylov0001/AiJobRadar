@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 import respx
 
 from aijobradar.models import SalaryPeriod, SourceStatus
@@ -101,5 +102,60 @@ def test_max_pages_is_a_hard_limit() -> None:
     page = _page("page1.json")  # always returns a next cursor
     route = respx.get(BASE_URL).mock(return_value=httpx.Response(200, json=page))
     with httpx.Client() as client:
-        run_adapter(_adapter(max_pages=3), client)
+        result = run_adapter(_adapter(max_pages=3), client)
     assert route.call_count == 3
+    assert result.status is SourceStatus.DEGRADED  # cut short is not "ok"
+    assert result.error == "truncated: max_pages=3 reached"
+    assert len(result.items) == 9
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"data": []}, {"jobs": None}, [], {"jobs": [], "nextCursor": 7}, {"jobs": []}],
+)
+@respx.mock
+def test_unexpected_envelope_is_failed_not_empty(payload: object) -> None:
+    respx.get(BASE_URL).mock(return_value=httpx.Response(200, json=payload))
+    with httpx.Client() as client:
+        result = run_adapter(_adapter(), client)
+    assert result.status is SourceStatus.FAILED
+    assert result.error is not None and "unexpected response" in result.error
+
+
+@respx.mock
+def test_unexpected_envelope_on_later_page_is_degraded() -> None:
+    respx.get(BASE_URL).mock(
+        side_effect=[httpx.Response(200, json=_page("page1.json")), httpx.Response(200, json={})]
+    )
+    with httpx.Client() as client:
+        result = run_adapter(_adapter(), client)
+    assert result.status is SourceStatus.DEGRADED
+    assert result.error is not None and result.error.startswith("page 2: ValueError: unexpected")
+
+
+@pytest.mark.parametrize("value", [None, "Developer", [1], "missing"])
+def test_parent_categories_not_a_list_of_names_is_invalid_not_out_of_scope(value: object) -> None:
+    record = _page("page1.json")["jobs"][0]
+    if value == "missing":
+        del record["parentCategories"]
+    else:
+        record["parentCategories"] = value
+    with pytest.raises(ValueError, match="parentCategories"):
+        _adapter().parse_record(record)
+
+
+def test_empty_parent_categories_is_out_of_scope() -> None:
+    record = _page("page1.json")["jobs"][0]
+    record["parentCategories"] = []
+    assert _adapter().parse_record(record) is None
+
+
+@respx.mock
+def test_parent_categories_dropped_from_the_format_fails_the_source() -> None:
+    page = _page("page2.json")
+    for job in page["jobs"]:
+        del job["parentCategories"]
+    respx.get(BASE_URL).mock(return_value=httpx.Response(200, json=page))
+    with httpx.Client() as client:
+        result = run_adapter(_adapter(), client)
+    assert (result.status, result.out_of_scope) == (SourceStatus.FAILED, 0)

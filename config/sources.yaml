@@ -1,7 +1,7 @@
 # Source settings. Terms of use and rationale per source: docs/sources.md
 himalayas:
   enabled: true
-  max_pages: 10        # 20 jobs per page; Himalayas caches data for 24h, so one sync a day
+  max_pages: 40        # 20 jobs per page; 3 days of all categories exceed 200 jobs. Himalayas caches data for 24h, so one sync a day
   lookback_days: 3
   parent_categories: [Developer]
 jobicy:

@@ -19,6 +19,18 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _parse_page(payload: Any) -> tuple[list[Any], str | None]:
+    """Reject an unexpected envelope: a silent [] would pass for an empty source."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+        raise ValueError("unexpected response: no 'jobs' list")
+    if "nextCursor" not in payload:  # a missing key would end the walk as if complete
+        raise ValueError("unexpected response: no 'nextCursor'")
+    cursor = payload["nextCursor"]
+    if cursor is not None and not isinstance(cursor, str):
+        raise ValueError("unexpected response: 'nextCursor' is not a string")
+    return payload["jobs"], cursor
+
+
 @dataclass
 class HimalayasAdapter:
     max_pages: int = 10
@@ -38,23 +50,25 @@ class HimalayasAdapter:
             try:
                 response = client.get(BASE_URL, params=params)
                 response.raise_for_status()
-                payload = response.json()
+                page, cursor = _parse_page(response.json())
             except Exception as exc:
                 if not records:
                     raise
                 message, code = describe_error(exc)
                 return Fetched(records, error=f"page {page_no}: {message}", http_status=code)
-            page = payload.get("jobs") or []
             records.extend(page)
-            cursor = payload.get("nextCursor")
-            # Order of the browse endpoint is not guaranteed; max_pages is the real bound.
+            # Newest first except pinned posts, hence the page maximum, not the last item.
             newest = max((job.get("pubDate") or 0 for job in page), default=0)
             if not cursor or not page or newest < cutoff:
-                break
-        return Fetched(records)
+                return Fetched(records)
+        # Pages within the lookback remain: the list is cut short, which must not read as "ok".
+        return Fetched(records, error=f"truncated: max_pages={self.max_pages} reached")
 
     def parse_record(self, record: dict[str, Any]) -> RawJob | None:
-        categories = record.get("parentCategories") or []
+        categories = record.get("parentCategories")
+        # A format change must not pass as out of scope: only a list of names is understood.
+        if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
+            raise ValueError("record lacks a parentCategories list")
         if self.parent_categories and not set(categories) & set(self.parent_categories):
             return None
         restrictions = list(record.get("locationRestrictions") or [])

@@ -32,7 +32,10 @@ def _text(item: Element, tag: str) -> str:
 
 def _extract(response: httpx.Response) -> list[Any]:
     root = SafeET.fromstring(response.content)
-    return list(root.iter("item"))
+    channel = root.find("channel")
+    if root.tag != "rss" or channel is None:  # any other XML would pass for an empty feed
+        raise ValueError(f"unexpected feed: <{root.tag}> is not an RSS channel")
+    return list(channel.findall("item"))
 
 
 @dataclass

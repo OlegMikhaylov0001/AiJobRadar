@@ -37,6 +37,9 @@ class FetchReport:
 def run_status(results: Sequence[SourceResult]) -> RunStatus:
     if not results or all(r.status is SourceStatus.FAILED for r in results):
         return RunStatus.FAILED
+    received = sum(len(r.items) for r in results)
+    if received and sum(r.ingest_errors for r in results) == received:
+        return RunStatus.FAILED  # nothing reached the database: not a success with warnings
     if any(
         r.status in (SourceStatus.FAILED, SourceStatus.DEGRADED) or r.ingest_errors for r in results
     ):

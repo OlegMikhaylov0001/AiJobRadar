@@ -13,9 +13,14 @@ _NO_RESTRICTION = frozenset({"", "anywhere", "worldwide"})
 
 def _extract(response: httpx.Response) -> list[Any]:
     payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected response: not an object")
     if payload.get("success") is False:
         raise ValueError(f"jobicy success=false (statusCode={payload.get('statusCode')})")
-    return list(payload.get("jobs") or [])
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):  # a silent [] would pass for an empty source
+        raise ValueError("unexpected response: no 'jobs' list")
+    return jobs
 
 
 @dataclass

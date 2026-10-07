@@ -29,8 +29,8 @@ class HimalayasConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    max_pages: int = 10
-    lookback_days: int = 3
+    max_pages: int = Field(10, ge=1)
+    lookback_days: int = Field(3, ge=1)
     parent_categories: list[str] = Field(default_factory=lambda: ["Developer"])
 
 
@@ -38,8 +38,8 @@ class JobicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    count: int = 50
-    industries: list[str] = Field(default_factory=lambda: ["engineering"])
+    count: int = Field(50, ge=1)
+    industries: list[str] = Field(default_factory=lambda: ["engineering"], min_length=1)
 
 
 class WwrConfig(BaseModel):
@@ -51,15 +51,16 @@ class WwrConfig(BaseModel):
             "remote-full-stack-programming-jobs",
             "remote-back-end-programming-jobs",
             "remote-programming-jobs",
-        ]
+        ],
+        min_length=1,
     )
 
 
 class DedupConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title_similarity: int = 92  # rapidfuzz token_sort_ratio threshold
-    match_window_days: int = 60  # also covers reposts
+    title_similarity: int = Field(92, ge=0, le=100)  # rapidfuzz token_sort_ratio threshold
+    match_window_days: int = Field(60, ge=1)  # also covers reposts
 
 
 class AppConfig(BaseModel):
