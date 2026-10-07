@@ -1,0 +1,46 @@
+{
+  "apiVersion": "2.2.16",
+  "documentationUrl": "https://example.test/apidocs",
+  "friendlyNotice": "synthetic fixture for tests",
+  "jobCount": 2,
+  "lastUpdate": "2026-09-30T04:00:00+00:00",
+  "appliedFilters": {"count": 50, "industry": "engineering"},
+  "jobs": [
+    {
+      "id": 900001,
+      "url": "https://jobicy.com/jobs/900001-senior-full-stack-engineer",
+      "jobSlug": "900001-senior-full-stack-engineer",
+      "jobTitle": "Senior Full-Stack Engineer (React/Node)",
+      "companyName": "Umbrella Billing ",
+      "companyLogo": "https://example.test/umbrella.png",
+      "jobIndustry": ["Software Engineering"],
+      "jobType": ["Full-Time"],
+      "jobGeo": "Europe,  Armenia",
+      "jobLevel": "Senior",
+      "jobExcerpt": "Invoices and contracts&hellip;",
+      "jobDescription": "<h3>About</h3><p>Invoices &amp; contracts.</p>",
+      "pubDate": "2026-09-29T08:00:00+00:00",
+      "salaryMin": 60000,
+      "salaryMax": 80000,
+      "salaryCurrency": "EUR",
+      "salaryPeriod": "yearly"
+    },
+    {
+      "id": 900002,
+      "url": "https://jobicy.com/jobs/900002-qa-automation-engineer",
+      "jobSlug": "900002-qa-automation-engineer",
+      "jobTitle": "QA Automation Engineer",
+      "companyName": "Hooli",
+      "companyLogo": "https://example.test/hooli.png",
+      "jobIndustry": ["QA & Testing"],
+      "jobType": ["Full-Time", "Contract"],
+      "jobGeo": "Anywhere",
+      "jobLevel": "Any",
+      "jobExcerpt": "Playwright&hellip;",
+      "jobDescription": "<p>Playwright and CI.</p>",
+      "pubDate": "2026-09-29T09:30:00+00:00"
+    }
+  ],
+  "statusCode": 200,
+  "success": true
+}

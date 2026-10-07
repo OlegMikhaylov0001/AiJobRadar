@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Back-End Programming Jobs (synthetic fixture)</title>
+    <item>
+      <title>Acme Ledger: Senior Backend Engineer</title>
+      <region>North America Only</region>
+      <country>🇨🇦 Canada and 🇺🇸 United States of America</country>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Location: Remote - US&lt;/p&gt;</description>
+      <pubDate>Mon, 28 Sep 2026 12:00:00 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/acme-ledger-senior-backend-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/acme-ledger-senior-backend-engineer</link>
+    </item>
+    <item>
+      <title>Hooli: Platform Engineer</title>
+      <region>Europe Only</region>
+      <country>🇧🇦 Bosnia and Herzegovina, 🇸🇰 Slovakia, and 🇺🇦 Ukraine</country>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Kubernetes.&lt;/p&gt;</description>
+      <pubDate>Tue, 29 Sep 2026 08:00:00 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/hooli-platform-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/hooli-platform-engineer</link>
+    </item>
+  </channel>
+</rss>

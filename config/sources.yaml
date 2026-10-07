@@ -1,0 +1,19 @@
+# Source settings. Terms of use and rationale per source: docs/sources.md
+himalayas:
+  enabled: true
+  max_pages: 10        # 20 jobs per page; Himalayas caches data for 24h, so one sync a day
+  lookback_days: 3
+  parent_categories: [Developer]
+jobicy:
+  enabled: true
+  count: 50
+  industries: [engineering]
+wwr:
+  enabled: true
+  feeds:
+    - remote-full-stack-programming-jobs
+    - remote-back-end-programming-jobs
+    - remote-programming-jobs
+dedup:
+  title_similarity: 92
+  match_window_days: 60

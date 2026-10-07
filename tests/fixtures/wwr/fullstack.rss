@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Full-Stack Programming Jobs (synthetic fixture)</title>
+    <ttl>60</ttl>
+    <item>
+      <title>Northwind Docs: Integrations Engineer</title>
+      <region>Anywhere in the World</region>
+      <country>🇦🇲 Armenia, 🇩🇪 Germany, and 🇺🇦 Ukraine</country>
+      <state></state>
+      <skills>TypeScript, Node.js, and PostgreSQL</skills>
+      <category>Full-Stack Programming</category>
+      <type>Contract</type>
+      <description>&lt;p&gt;&lt;strong&gt;Headquarters:&lt;/strong&gt; Remote&lt;/p&gt;&lt;p&gt;Sync CRM data.&lt;/p&gt;</description>
+      <pubDate>Tue, 29 Sep 2026 10:00:00 +0000</pubDate>
+      <expires_at>Thu, 29 Oct 2026 10:00:00 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/northwind-docs-integrations-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/northwind-docs-integrations-engineer</link>
+    </item>
+    <item>
+      <title>Acme Ledger: Senior Backend Engineer</title>
+      <region>North America Only</region>
+      <country>🇨🇦 Canada and 🇺🇸 United States of America</country>
+      <state>New York</state>
+      <skills></skills>
+      <category>Full-Stack Programming</category>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Location: Remote - US&lt;/p&gt;</description>
+      <pubDate>Mon, 28 Sep 2026 12:00:00 +0000</pubDate>
+      <expires_at>Wed, 28 Oct 2026 12:00:00 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/acme-ledger-senior-backend-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/acme-ledger-senior-backend-engineer</link>
+    </item>
+  </channel>
+</rss>
