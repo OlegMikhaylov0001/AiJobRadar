@@ -73,3 +73,13 @@ def test_industries_are_merged_without_duplicates() -> None:
     with httpx.Client() as client:
         result = run_adapter(JobicyAdapter(industries=("engineering", "dev")), client)
     assert len(result.items) == 2
+
+
+@pytest.mark.parametrize("payload", [{"success": True}, {"jobs": None}, []])
+@respx.mock
+def test_unexpected_envelope_is_failed_not_empty(payload: object) -> None:
+    respx.get(API_URL).mock(return_value=httpx.Response(200, json=payload))
+    with httpx.Client() as client:
+        result = run_adapter(JobicyAdapter(), client)
+    assert result.status is SourceStatus.FAILED
+    assert result.error is not None and "unexpected response" in result.error

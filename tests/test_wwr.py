@@ -87,3 +87,22 @@ def test_one_feed_blocked_is_degraded() -> None:
     assert result.status is SourceStatus.DEGRADED
     assert result.error == "remote-programming-jobs: HTTP 403"
     assert len(result.items) == 3
+
+
+@respx.mock
+def test_xml_that_is_not_an_rss_channel_is_failed_not_empty() -> None:
+    respx.get(FULL).mock(return_value=httpx.Response(200, content=b"<html><body/></html>"))
+    with httpx.Client() as client:
+        result = run_adapter(WwrAdapter(feeds=("remote-full-stack-programming-jobs",)), client)
+    assert result.status is SourceStatus.FAILED
+    assert result.error is not None and "not an RSS channel" in result.error
+
+
+@respx.mock
+def test_rss_channel_without_items_is_empty() -> None:
+    respx.get(FULL).mock(
+        return_value=httpx.Response(200, content=b"<rss><channel><title>t</title></channel></rss>")
+    )
+    with httpx.Client() as client:
+        result = run_adapter(WwrAdapter(feeds=("remote-full-stack-programming-jobs",)), client)
+    assert result.status is SourceStatus.EMPTY

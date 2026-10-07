@@ -127,7 +127,11 @@ def run_adapter(adapter: Adapter, client: httpx.Client) -> SourceResult:
 
     total = len(fetched.records)
     error = fetched.error
-    if fetched.error:
+    if total and invalid == total:  # records arrived, none usable: a format change, not "ok"
+        status = SourceStatus.FAILED
+        note = f"all {total} records invalid; first: {first_invalid}"
+        error = f"{fetched.error}; {note}" if fetched.error else note
+    elif fetched.error:
         status = SourceStatus.DEGRADED
     elif total and invalid / total > DEGRADED_INVALID_SHARE:
         status = SourceStatus.DEGRADED

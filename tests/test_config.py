@@ -42,3 +42,20 @@ def test_empty_config_uses_defaults(tmp_path: Path) -> None:
 def test_unknown_config_keys_are_rejected(raw: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         AppConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"himalayas": {"max_pages": 0}},
+        {"himalayas": {"lookback_days": 0}},
+        {"jobicy": {"count": 0}},
+        {"jobicy": {"industries": []}},
+        {"wwr": {"feeds": []}},
+        {"dedup": {"title_similarity": 101}},
+        {"dedup": {"match_window_days": 0}},
+    ],
+)
+def test_values_that_would_fetch_nothing_are_rejected(raw: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(raw)

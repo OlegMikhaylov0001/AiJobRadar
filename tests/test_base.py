@@ -80,9 +80,21 @@ def test_validation_error_is_summarized_without_input_values() -> None:
 
 
 def test_invalid_record_error_is_one_line() -> None:
-    result = _run(FakeAdapter(records=["multiline", "multiline"]))
+    result = _run(FakeAdapter(records=["1", "multiline", "multiline"]))
     assert result.error is not None and "\n" not in result.error
     assert "first line second line" in result.error
+
+
+def test_failed_when_every_record_is_invalid() -> None:
+    result = _run(FakeAdapter(records=["bad", "bad"]))
+    assert result.status is SourceStatus.FAILED
+    assert result.error == "all 2 records invalid; first: ValueError: broken record"
+
+
+def test_failed_when_partial_fetch_left_only_invalid_records() -> None:
+    result = _run(FakeAdapter(records=["bad"], error="page 2: HTTP 429"))
+    assert result.status is SourceStatus.FAILED
+    assert result.error is not None and result.error.startswith("page 2: HTTP 429; all 1 ")
 
 
 def test_empty_when_no_records() -> None:

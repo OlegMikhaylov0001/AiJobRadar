@@ -39,6 +39,15 @@ def test_run_status_rules() -> None:
     assert run_status([_r(SourceStatus.OK), _r(SourceStatus.EMPTY)]) is RunStatus.OK
 
 
+def test_run_status_is_failed_when_no_record_reached_the_database() -> None:
+    job = RawJob(source="s", source_job_id="1", source_url="https://x/1", title="T", company="C")
+    stored_none = SourceResult(source="s", status=SourceStatus.OK, items=[job], ingest_errors=1)
+    stored_one = SourceResult(source="s", status=SourceStatus.OK, items=[job, job], ingest_errors=1)
+    assert run_status([stored_none, _r(SourceStatus.FAILED)]) is RunStatus.FAILED
+    assert run_status([stored_none, _r(SourceStatus.EMPTY)]) is RunStatus.FAILED
+    assert run_status([stored_one]) is RunStatus.PARTIAL
+
+
 def test_build_adapters_respects_enabled() -> None:
     cfg = AppConfig.model_validate({"jobicy": {"enabled": False}})
     assert [a.name for a in build_adapters(cfg)] == ["himalayas", "wwr"]
@@ -218,13 +227,14 @@ def test_ingest_failure_of_one_record_is_isolated_and_counted(
 class _OneRecordAdapter:
     """Yields jobs whose `source` overflows the job_sources column: a real Postgres error."""
 
+    records: tuple[str, ...] = ("bad-source", "fine")
     name: str = "fake"
 
     def fetch(self, client: httpx.Client) -> Fetched:
-        return Fetched(["bad-source", "fine"])
+        return Fetched(list(self.records))
 
     def parse_record(self, record: Any) -> RawJob | None:
-        source = "s" * 40 if record == "bad-source" else "fake"
+        source = "s" * 40 if record.startswith("bad-source") else "fake"
         return RawJob(
             source=source,
             source_job_id=record,
@@ -244,3 +254,13 @@ def test_real_database_error_rolls_back_only_that_record(session: Session) -> No
     source_run = session.scalars(select(SourceRun)).one()
     assert source_run.error is not None and "\n" not in source_run.error
     assert "ingest: 1 not stored" in source_run.error
+
+
+def test_run_where_no_record_was_stored_is_failed_and_committed_as_such(session: Session) -> None:
+    adapter = _OneRecordAdapter(records=("bad-source-1", "bad-source-2"))
+    with httpx.Client() as client:
+        report = run_fetch(session, [adapter], client, now=NOW, dedup_cfg=DedupConfig())
+    assert report.status is RunStatus.FAILED  # exit code 1 in the CLI, not a quiet partial
+    run = session.get(Run, report.run_id)
+    assert run is not None and run.status == "failed"
+    assert run.counts == {"new": 0, "merged": 0, "seen": 0, "ingest_errors": 2}
