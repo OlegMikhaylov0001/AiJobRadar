@@ -14,6 +14,8 @@ FEED_URL = "https://weworkremotely.com/categories/{slug}.rss"
 _FLAG = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")  # regional-indicator pair = one flag
 _TRAILING_SEPARATOR = re.compile(r"(?:,\s*and|,|\s+and)\s*$")
 _SKILL_SEPARATOR = re.compile(r",\s*(?:and\s+)?|\s+and\s+")
+_WORLDWIDE_REGION = "anywhere in the world"
+_ONLY_SUFFIX = re.compile(r"\s+only$", re.IGNORECASE)
 
 
 def split_countries(value: str) -> list[str]:
@@ -24,6 +26,19 @@ def split_countries(value: str) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+def region_restrictions(region: str, countries: list[str]) -> list[str]:
+    """Countries are the precise restriction when listed (even under "Anywhere in the World").
+
+    Without them a region like "North America Only" is the restriction; leaving it out would
+    read as "no restriction".
+    """
+    if countries:
+        return countries
+    if not region or region.casefold() == _WORLDWIDE_REGION:
+        return []
+    return [_ONLY_SUFFIX.sub("", region).strip()]
 
 
 def _text(item: Element, tag: str) -> str:
@@ -72,7 +87,7 @@ class WwrAdapter:
             title=title,
             company=company,
             location_text=location or None,
-            location_restrictions=countries,
+            location_restrictions=region_restrictions(region, countries),
             employment_type=_text(item, "type") or None,
             posted_at=parse_rfc822_utc(_text(item, "pubDate")),
             description_html=_text(item, "description"),
