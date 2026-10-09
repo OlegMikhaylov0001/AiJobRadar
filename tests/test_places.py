@@ -63,3 +63,18 @@ def _only(text: str) -> str | None:
 )
 def test_place_group_in_text(text: str, code: str | None) -> None:
     assert _only(text) == code
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("US & Canada", "NORTH_AMERICA"),
+        ("USA/Canada", "NORTH_AMERICA"),
+        ("Remote - US/Canada", "NORTH_AMERICA"),
+        ("Ukraine", "UA"),
+        ("US", "US"),
+    ],
+)
+def test_place_group_prefers_the_longest_alias_without_an_anchor(text: str, code: str) -> None:
+    match = re.search(rf"(?<![\w.]){GAZ.place_group}(?![\w])", text, re.I)
+    assert match is not None and GAZ.canonical(match.group("place")) == code

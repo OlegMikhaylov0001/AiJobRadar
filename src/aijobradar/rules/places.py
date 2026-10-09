@@ -14,19 +14,13 @@ def normalize_place(token: str) -> str:
     return " ".join(s.split()).strip(" .-")
 
 
-def _alternation(aliases: Iterable[str]) -> str:
-    # Longest first, so "united states of america" wins over "united states".
-    return "|".join(re.escape(a) for a in sorted(aliases, key=len, reverse=True))
-
-
 class Gazetteer:
     """Place aliases -> canonical codes, plus one regex group that finds any alias in text."""
 
     def __init__(self, places: Mapping[str, Sequence[str]], case_sensitive: Iterable[str]) -> None:
         sensitive = set(case_sensitive)
         self._lookup: dict[str, str] = {}
-        cs: list[str] = []
-        ci: list[str] = []
+        all_aliases: set[str] = set()
         for code, aliases in places.items():
             for alias in aliases:
                 key = normalize_place(alias)
@@ -34,15 +28,15 @@ class Gazetteer:
                 if existing is not None and existing != code:
                     raise ValueError(f"alias {alias!r} maps to both {existing} and {code}")
                 self._lookup[key] = code
-                (cs if alias in sensitive else ci).append(alias)
+                all_aliases.add(alias)
         self.codes = frozenset(places)
-        # Short codes such as "US" are also ordinary words ("contact us only"): match them
-        # case-sensitively inside an otherwise case-insensitive pattern.
-        parts = []
-        if cs:
-            parts.append(f"(?-i:{_alternation(cs)})")
-        if ci:
-            parts.append(_alternation(ci))
+        # One alternation over every alias, longest first, across both kinds. That single order
+        # is what makes "US/Canada" match the NORTH_AMERICA alias before the bare "US".
+        # Short codes such as "US" are also ordinary words ("contact us only"), so each
+        # case-sensitive alias is wrapped on its own in (?-i:...) inside the
+        # case-insensitive pattern.
+        ordered = sorted(all_aliases, key=lambda a: (-len(a), a))
+        parts = [f"(?-i:{re.escape(a)})" if a in sensitive else re.escape(a) for a in ordered]
         self.place_group = f"(?P<place>{'|'.join(parts)})"
 
     def canonical(self, token: str) -> str | None:
