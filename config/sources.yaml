@@ -1,8 +1,12 @@
 # Source settings. Terms of use and rationale per source: docs/sources.md
 himalayas:
   enabled: true
-  max_pages: 40        # 20 jobs per page; 3 days of all categories exceed 200 jobs. Himalayas caches data for 24h, so one sync a day
-  lookback_days: 3
+  # Whole recent feed (no category filter in the API): 3-3.5k jobs a day, ~12 jobs a page,
+  # 8-12 pages an hour: 30 hours take ~350 pages (~6 min); max_pages leaves room for heavy days.
+  # Daily run + 6h margin for a late cron; data is cached for 24h, so one sync a day.
+  max_pages: 500
+  lookback_hours: 30
+  page_delay_s: 0.5
   parent_categories: [Developer]
 jobicy:
   enabled: true

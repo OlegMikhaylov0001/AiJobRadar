@@ -18,7 +18,7 @@ from aijobradar.normalize import NormalizedJob
 from aijobradar.pipeline import FetchReport, RunStatus, format_report, run_fetch, run_status
 from aijobradar.sources import build_adapters
 from aijobradar.sources.base import Adapter, Fetched
-from aijobradar.sources.himalayas import BASE_URL, HimalayasAdapter
+from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
 from aijobradar.sources.jobicy import API_URL, JobicyAdapter
 from aijobradar.sources.wwr import FEED_URL, WwrAdapter
 from tests.conftest import fixture_path
@@ -57,7 +57,7 @@ def _mock_sources(jobicy_status: int = 200) -> None:
     pages = [
         json.loads(fixture_path("himalayas", n).read_text()) for n in ("page1.json", "page2.json")
     ]
-    respx.get(BASE_URL).mock(side_effect=[httpx.Response(200, json=p) for p in pages])
+    respx.get(SEARCH_URL).mock(side_effect=[httpx.Response(200, json=p) for p in pages])
     respx.get(API_URL).mock(
         return_value=httpx.Response(
             jobicy_status, json=json.loads(fixture_path("jobicy", "engineering.json").read_text())
@@ -70,7 +70,7 @@ def _mock_sources(jobicy_status: int = 200) -> None:
 
 def _adapters() -> list[Adapter]:
     return [
-        HimalayasAdapter(now=lambda: NOW),
+        HimalayasAdapter(now=lambda: NOW, page_delay_s=0),
         JobicyAdapter(),
         WwrAdapter(feeds=("remote-full-stack-programming-jobs",)),
     ]

@@ -3,8 +3,7 @@
   "updatedAt": 1790640000,
   "offset": 20,
   "limit": 20,
-  "totalCount": 6,
-  "nextCursor": null,
+  "totalCount": 25,
   "jobs": [
     {
       "title": "Full Stack Engineer",

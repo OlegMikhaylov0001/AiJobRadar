@@ -1,3 +1,4 @@
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -9,8 +10,7 @@ from aijobradar.models import RawJob
 from aijobradar.sources.base import Fetched, describe_error
 from aijobradar.sources.common import parse_salary_period
 
-BASE_URL = "https://himalayas.app/jobs/api"
-PAGE_LIMIT = 20
+SEARCH_URL = "https://himalayas.app/jobs/api/search"
 # 26 whole-hour offsets from UTC-11 to UTC+14: a job allowing all of them has no tz restriction.
 _ALL_OFFSETS = 26
 
@@ -19,47 +19,64 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _parse_page(payload: Any) -> tuple[list[Any], str | None]:
-    """Reject an unexpected envelope: a silent [] would pass for an empty source."""
+def _count(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:  # bool is an int
+        raise ValueError(f"unexpected response: '{key}' is not a non-negative integer")
+    return value
+
+
+def _parse_page(payload: Any, page_no: int) -> tuple[list[Any], bool]:
+    """Return the page's jobs and whether it is the last page; reject an unexpected envelope."""
     if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
         raise ValueError("unexpected response: no 'jobs' list")
-    if "nextCursor" not in payload:  # a missing key would end the walk as if complete
-        raise ValueError("unexpected response: no 'nextCursor'")
-    cursor = payload["nextCursor"]
-    if cursor is not None and not isinstance(cursor, str):
-        raise ValueError("unexpected response: 'nextCursor' is not a string")
-    return payload["jobs"], cursor
+    offset, limit, total = (_count(payload, key) for key in ("offset", "limit", "totalCount"))
+    # The end is computed from these counters, so they must describe the page we asked for.
+    if limit < 1 or offset != (page_no - 1) * limit:
+        raise ValueError(f"unexpected response: offset/limit do not match page {page_no}")
+    # An empty page is the end only past the last record; inside the range it hides jobs.
+    if not payload["jobs"] and offset < total:
+        raise ValueError("unexpected response: empty page before totalCount")
+    return payload["jobs"], offset + limit >= total
 
 
 @dataclass
 class HimalayasAdapter:
-    max_pages: int = 10
-    lookback_days: int = 3
+    """All categories, newest first (`sort=recent`); the category filter is ours, in parse_record.
+
+    The search endpoint has no category parameter, and keyword queries miss part of the
+    Developer category, so the adapter walks the whole recent feed back to the lookback cutoff.
+    """
+
+    max_pages: int = 500
+    lookback_hours: int = 30
+    page_delay_s: float = 0.5
     parent_categories: tuple[str, ...] = ("Developer",)
     now: Callable[[], datetime] = field(default=_utcnow)
+    sleep: Callable[[float], None] = field(default=time.sleep)
     name: str = "himalayas"
 
     def fetch(self, client: httpx.Client) -> Fetched:
-        cutoff = (self.now() - timedelta(days=self.lookback_days)).timestamp()
+        cutoff = (self.now() - timedelta(hours=self.lookback_hours)).timestamp()
         records: list[Any] = []
-        cursor: str | None = None
         for page_no in range(1, self.max_pages + 1):
-            params: dict[str, str | int] = {"limit": PAGE_LIMIT}
-            if cursor:
-                params["cursor"] = cursor
+            if page_no > 1:
+                self.sleep(self.page_delay_s)  # one daily sync of a few hundred pages, spaced out
             try:
-                response = client.get(BASE_URL, params=params)
+                response = client.get(SEARCH_URL, params={"sort": "recent", "page": page_no})
                 response.raise_for_status()
-                page, cursor = _parse_page(response.json())
+                page, last = _parse_page(response.json(), page_no)
             except Exception as exc:
                 if not records:
                     raise
                 message, code = describe_error(exc)
                 return Fetched(records, error=f"page {page_no}: {message}", http_status=code)
             records.extend(page)
-            # Newest first except pinned posts, hence the page maximum, not the last item.
-            newest = max((job.get("pubDate") or 0 for job in page), default=0)
-            if not cursor or not page or newest < cutoff:
+            # Newest first except a few pinned old posts on top, hence the page maximum. An undated
+            # record could be fresh, so only a fully dated page may end the walk by date.
+            dates = [job.get("pubDate") if isinstance(job, dict) else None for job in page]
+            dated = [d for d in dates if isinstance(d, int | float) and not isinstance(d, bool)]
+            if last or (dated and len(dated) == len(dates) and max(dated) < cutoff):
                 return Fetched(records)
         # Pages within the lookback remain: the list is cut short, which must not read as "ok".
         return Fetched(records, error=f"truncated: max_pages={self.max_pages} reached")
