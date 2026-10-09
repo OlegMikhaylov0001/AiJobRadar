@@ -102,3 +102,23 @@ def test_multiple_foreign_places_still_reject() -> None:
 def test_nearby_word_that_is_not_an_eligible_place_still_rejects() -> None:
     facts = make_facts(description="US citizens only. We are a European company.")
     assert geo_residency(facts, CTX) is not None
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["No remote work. US only.", "US only; EU applicants not considered."],
+)
+def test_country_only_hedges_do_not_cross_clauses(description: str) -> None:
+    assert geo_country_only(make_facts(description=description), CTX) is not None
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "We don't sponsor visas. US citizens only.",
+        "US citizens only. Sign-on bonus of 5k.",
+        "TS/SCI clearance required. Bonus points for Rust.",
+    ],
+)
+def test_residency_hedges_do_not_cross_clauses(description: str) -> None:
+    assert geo_residency(make_facts(description=description), CTX) is not None

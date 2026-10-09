@@ -31,6 +31,7 @@ _CLEARANCE = (
 )
 _NEGATION = re.compile(r"\b(?:no|not|without|never)\b|n't", re.IGNORECASE)
 _SOFT = re.compile(r"\b(?:preferred|a\s+plus|nice\s+to\s+have|desirable|bonus)\b", re.IGNORECASE)
+_CLAUSE_END = re.compile(r"[.;!?](?=\s|$)")
 _NEARBY_PLACE = 80
 _NEGATION_REACH = 25
 _SOFT_REACH = 30
@@ -58,19 +59,33 @@ def compile_geo_patterns(place_group: str) -> GeoPatterns:
     )
 
 
+def _before(line: str, start: int, width: int) -> str:
+    """Up to `width` chars before `start`, clipped to the current clause."""
+    window = line[max(0, start - width) : start]
+    ends = list(_CLAUSE_END.finditer(window))
+    return window[ends[-1].end() :] if ends else window
+
+
+def _after(line: str, end: int, width: int) -> str:
+    """Up to `width` chars after `end`, clipped to the current clause."""
+    window = line[end : end + width]
+    stop = _CLAUSE_END.search(window)
+    return window[: stop.start()] if stop else window
+
+
 def _negated(line: str, match: re.Match[str]) -> bool:
-    return bool(_NEGATION.search(line[max(0, match.start() - _NEGATION_REACH) : match.start()]))
+    return bool(_NEGATION.search(_before(line, match.start(), _NEGATION_REACH)))
 
 
 def _soft(line: str, match: re.Match[str]) -> bool:
-    return bool(_SOFT.search(line[match.end() : match.end() + _SOFT_REACH]))
+    return bool(_SOFT.search(_after(line, match.end(), _SOFT_REACH)))
 
 
 def _eligible_nearby(line: str, match: re.Match[str], ctx: "RuleContext") -> bool:
     """An eligible place in the same phrase ("US or Europe") makes the restriction non-exclusive."""
     windows = (
-        line[max(0, match.start() - _NEARBY_PLACE) : match.start()],
-        line[match.end() : match.end() + _NEARBY_PLACE],
+        _before(line, match.start(), _NEARBY_PLACE),
+        _after(line, match.end(), _NEARBY_PLACE),
     )
     return any(
         ctx.gazetteer.canonical(near.group("place")) in ctx.eligible
