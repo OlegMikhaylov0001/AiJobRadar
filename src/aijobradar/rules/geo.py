@@ -1,8 +1,17 @@
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from aijobradar.rules.clauses import after, before, negated, soft
+from aijobradar.rules.clauses import (
+    CLAUSE_REACH,
+    after,
+    before,
+    first_hit,
+    negated,
+    soft,
+    temporal,
+)
 from aijobradar.rules.facts import JobFacts
 
 if TYPE_CHECKING:
@@ -10,6 +19,9 @@ if TYPE_CHECKING:
 
 # "{P}" is replaced by Gazetteer.place_group. (?<![\w.]) / (?![\w]) keep "US" from matching
 # inside words; the group itself keeps short codes case-sensitive.
+
+# Only title and location are scanned: descriptions are left to the LLM (free text is
+# context-blind for regex).
 _COUNTRY_ONLY = (
     r"(?<![\w.]){P}(?![\w])\s*[-(]?\s*only\b",
     r"\bonly\s+(?:open\s+to\s+|accepting\s+|hiring\s+)?(?:candidates|applicants|people|residents)?"
@@ -26,12 +38,10 @@ _RESIDENCY = (
     r"(?<![\w.]){P}(?![\w])\s+citizenship\s+(?:is\s+)?required\b",
 )
 _CLEARANCE = (
-    r"\b(?:active|current|valid|secret|top\s+secret|ts/sci|government)\s+(?:security\s+)?clearance\b"
+    r"\b(?:active|current|valid|secret|top\s+secret|ts/sci)\s+(?:security\s+)?clearance\b"
     r"|\bsecurity\s+clearance\s+(?:is\s+)?required\b"
     r"|\bmust\s+(?:hold|have|obtain)\s+(?:an?\s+)?(?:active\s+)?security\s+clearance\b"
 )
-# Sane upper bound for "same phrase" lookups; the clause boundary is what actually clips.
-_CLAUSE_REACH = 200
 
 
 @dataclass(frozen=True)
@@ -39,7 +49,7 @@ class GeoPatterns:
     country_only: tuple[re.Pattern[str], ...]
     remote_place: re.Pattern[str]
     residency: tuple[re.Pattern[str], ...]
-    clearance: re.Pattern[str]
+    clearance: tuple[re.Pattern[str], ...]
     any_place: re.Pattern[str]
 
 
@@ -47,11 +57,14 @@ def compile_geo_patterns(place_group: str) -> GeoPatterns:
     def c(template: str) -> re.Pattern[str]:
         return re.compile(template.replace("{P}", place_group), re.IGNORECASE)
 
+    def cs(templates: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+        return tuple(c(t) for t in templates)
+
     return GeoPatterns(
-        country_only=tuple(c(t) for t in _COUNTRY_ONLY),
+        country_only=cs(_COUNTRY_ONLY),
         remote_place=c(_REMOTE_PLACE),
-        residency=tuple(c(t) for t in _RESIDENCY),
-        clearance=re.compile(_CLEARANCE, re.IGNORECASE),
+        residency=cs(_RESIDENCY),
+        clearance=cs((_CLEARANCE,)),
         any_place=c(r"(?<![\w.]){P}(?![\w])"),
     )
 
@@ -59,8 +72,8 @@ def compile_geo_patterns(place_group: str) -> GeoPatterns:
 def _eligible_nearby(line: str, match: re.Match[str], ctx: "RuleContext") -> bool:
     """An eligible place in the same phrase ("US or Europe") makes the restriction non-exclusive."""
     windows = (
-        before(line, match.start(), _CLAUSE_REACH),
-        after(line, match.end(), _CLAUSE_REACH),
+        before(line, match.start(), CLAUSE_REACH),
+        after(line, match.end(), CLAUSE_REACH),
     )
     return any(
         ctx.gazetteer.canonical(near.group("place")) in ctx.eligible
@@ -69,8 +82,12 @@ def _eligible_nearby(line: str, match: re.Match[str], ctx: "RuleContext") -> boo
     )
 
 
+def _hedged(line: str, match: re.Match[str]) -> bool:
+    return negated(line, match) or soft(line, match) or temporal(line, match)
+
+
 def _foreign_place(
-    patterns: tuple[re.Pattern[str], ...], text: str, ctx: "RuleContext"
+    patterns: Iterable[re.Pattern[str]], text: str, ctx: "RuleContext"
 ) -> str | None:
     """First explicit phrase whose place is known, not eligible, and not hedged."""
     for line in text.split("\n"):
@@ -79,18 +96,22 @@ def _foreign_place(
                 code = ctx.gazetteer.canonical(match.group("place"))
                 if code is None or code in ctx.eligible:
                     continue
-                if negated(line, match) or soft(line, match) or _eligible_nearby(line, match, ctx):
+                if _hedged(line, match) or _eligible_nearby(line, match, ctx):
                     continue
                 return f"{code}: {match.group(0)}"
     return None
 
 
-def _clearance(text: str, ctx: "RuleContext") -> str | None:
-    for line in text.split("\n"):
-        for match in ctx.geo.clearance.finditer(line):
-            if not (negated(line, match) or soft(line, match)):
-                return f"clearance: {match.group(0)}"
-    return None
+def _clearance(patterns: Iterable[re.Pattern[str]], text: str) -> str | None:
+    found = first_hit(patterns, text, _hedged)
+    return f"clearance: {found}" if found else None
+
+
+def _head(f: JobFacts) -> str:
+    # location_text is derived from the structured fields for every current source, so without
+    # restrictions it only repeats what the merged (widened) geo already dropped: e.g. a WWR
+    # "USA Only" record merged with an unrestricted twin must stay open.
+    return f"{f.title}\n{f.location_text}" if f.location_restrictions else f.title
 
 
 def geo_country_only(f: JobFacts, ctx: "RuleContext") -> str | None:
@@ -99,19 +120,12 @@ def geo_country_only(f: JobFacts, ctx: "RuleContext") -> str | None:
         # Any unknown token (a city, "Remote") makes the restriction ambiguous: leave it to the LLM.
         if all(c is not None for c in codes) and not any(c in ctx.eligible for c in codes):
             return "restrictions: " + ", ".join(sorted({c for c in codes if c}))
-    # location_text is derived from the structured fields for every current source, so without
-    # restrictions it only repeats what the merged (widened) geo already dropped: e.g. a WWR
-    # "USA Only" record merged with an unrestricted twin must stay open. Title and description
-    # are still scanned.
-    head = f"{f.title}\n{f.location_text}" if f.location_restrictions else f.title
+    head = _head(f)
     return _foreign_place((ctx.geo.remote_place,), head, ctx) or _foreign_place(
-        ctx.geo.country_only, f"{head}\n{f.description}", ctx
+        ctx.geo.country_only, head, ctx
     )
 
 
 def geo_residency(f: JobFacts, ctx: "RuleContext") -> str | None:
-    text = f"{f.title}\n{f.location_text}\n{f.description}"
-    found = _foreign_place(ctx.geo.residency, text, ctx)
-    if found:
-        return found
-    return _clearance(text, ctx)
+    head = _head(f)
+    return _foreign_place(ctx.geo.residency, head, ctx) or _clearance(ctx.geo.clearance, head)

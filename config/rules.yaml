@@ -1,6 +1,9 @@
 # Deterministic pre-LLM rules (spec §6.3). Generic and public: personal values (eligible
 # places, minimum rate, excluded employer countries) live in private/profile.yaml.
-version: "2026-10-09.1"     # bump on any change; stored with every rule decision
+# Rules read only short structured fields: title, company, location (text + structured
+# restrictions), salary and posting date. No rule reads the description: free text is
+# context-blind for regex, so it is left to the LLM stage.
+version: "2026-10-09.6"     # bump on any change; stored with every rule decision
 stale_days: 30
 rate_margin: 0.10            # reject only when the stated ceiling is >10% below the floor
 review_sample_size: 5        # rejected jobs per run sampled into review_queue (false-reject audit)
@@ -130,13 +133,7 @@ not_remote_location_patterns:
   - '\bhybrid\b'
   - '\bon-?site\b'
   - '\bin[- ]office\b'
-# Title/location: a hit is ignored when the same field also says "remote" or negates it.
-# Description: only unambiguous phrases ("we have an office in Berlin" must pass); a hit is
-# ignored when its clause is negated or hedged (remote / optional / if you / near).
-not_remote_description_patterns:
-  - '\b(?:this|the)\s+(?:role|position|job)\s+is\s+(?:a\s+)?(?:hybrid|on-?site)\b'
-  - '\bthis\s+is\s+an?\s+(?:hybrid|on-?site)\s+(?:role|position)\b'
-  - '\b(?:[1-5]|one|two|three|four|five)\s+days?\s+(?:a|per)\s+week\s+(?:in|at|from)\s+(?:the|our)\s+office\b'
+# A hit is ignored when the same field also says "remote", negates it or makes it optional.
 
 # R-NON-ENG-ROLE: matched as whole words on the normalized title; an engineering term wins.
 non_engineering_title_terms: [sales, account executive, account manager, business development,
@@ -150,8 +147,9 @@ engineering_title_terms: [engineer, engineering, developer, programmer, architec
   database, machine learning, ml, ai, platform, infrastructure, security, mobile, ios, android,
   web developer, scientist, analyst]
 
-# R-EMPLOYER-COUNTRY: marker sets per employer country (matched case-insensitively on company,
-# title and description). Which countries are excluded is decided by the private profile.
+# R-EMPLOYER-COUNTRY: legal/accounting/currency markers per employer country (never plain
+# country names), matched case-insensitively on company and title. Which countries are
+# excluded is decided by the private profile.
 employer_country_markers:
   RU:
     - 'тк\s*рф'

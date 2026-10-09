@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from aijobradar.config import load_rules_config
+from aijobradar.db.models import Job
 from aijobradar.profile import Profile
 from aijobradar.rules.context import RuleContext, build_rule_context
 from aijobradar.rules.facts import JobFacts
@@ -32,7 +33,6 @@ def make_facts(**overrides: Any) -> JobFacts:
         "title": "Backend Engineer",
         "location_text": "",
         "location_restrictions": (),
-        "description": "",
         "salary_min": None,
         "salary_max": None,
         "salary_currency": None,
@@ -45,3 +45,29 @@ def make_facts(**overrides: Any) -> JobFacts:
     if "title" in overrides and "title_norm" not in overrides:
         data["title_norm"] = normalize_title(data["title"])
     return JobFacts(**data)
+
+
+# The strongest description wording per rule. No rule reads descriptions (free text is
+# context-blind for regex; the LLM stage judges it), so none of these may ever reject.
+STRONG_DESCRIPTIONS = (
+    "US citizens only.",
+    "This role is US only.",
+    "Candidates must be authorized to work in the United States.",
+    "An active security clearance is required.",
+    "This is a hybrid role based in Lisbon.",
+    "Оформление по ТК РФ, белая зарплата.",
+)
+
+
+def facts_from_job(description: str) -> JobFacts:
+    """Facts built the way the engine builds them, from an (unsaved) Job with this description."""
+    job = Job(
+        id=uuid.uuid4(),
+        company_raw="Acme",
+        title_raw="Backend Engineer",
+        title_norm=normalize_title("Backend Engineer"),
+        location_text=None,
+        location_restrictions=[],
+        description_text=description,
+    )
+    return JobFacts.from_job(job)

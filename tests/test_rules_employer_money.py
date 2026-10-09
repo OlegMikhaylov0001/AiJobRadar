@@ -2,7 +2,7 @@ import pytest
 
 from aijobradar.rules.employer import employer_country
 from aijobradar.rules.money import rate_floor, usd_per_hour
-from tests.rules_support import CFG, make_ctx, make_facts
+from tests.rules_support import CFG, STRONG_DESCRIPTIONS, facts_from_job, make_ctx, make_facts
 
 CTX = make_ctx()  # excluded RU, floor 20 USD/h
 
@@ -10,22 +10,28 @@ CTX = make_ctx()  # excluded RU, floor 20 USD/h
 @pytest.mark.parametrize(
     ("fields", "hit"),
     [
-        ({"description": "Оформление по ТК РФ, белая зарплата."}, True),
         ({"title": "Backend-разработчик (от 200 000 ₽)"}, True),
         ({"company": "ООО «Ромашка»"}, True),
-        ({"description": "Аккредитованная IT-компания."}, True),
         ({"salary_currency": "RUB"}, True),
-        ({"description": "Russian-speaking team, payments in USD."}, False),
-        ({"description": "Команда говорит по-русски, оплата в USD."}, False),
+        ({"title": "Backend-разработчик (оформление по ТК РФ)"}, True),
+        ({"company": "Аккредитованная IT-компания «Ромашка»"}, True),
+        ({"title": "Backend Engineer (Russian-speaking team)"}, False),  # a language, not a marker
+        ({"company": "Russia Remote Tech Ltd"}, False),  # country names are not markers
+        ({"salary_currency": "USD"}, False),
     ],
 )
 def test_employer_country(fields: dict[str, str], hit: bool) -> None:
     assert (employer_country(make_facts(**fields), CTX) is not None) is hit
 
 
+@pytest.mark.parametrize("description", STRONG_DESCRIPTIONS)
+def test_employer_country_ignores_description(description: str) -> None:
+    assert employer_country(facts_from_job(description), CTX) is None
+
+
 def test_employer_country_inactive_without_exclusions() -> None:
     ctx = make_ctx(excluded_employer_countries=[])
-    assert employer_country(make_facts(description="Оформление по ТК РФ"), ctx) is None
+    assert employer_country(make_facts(company="ООО «Ромашка»"), ctx) is None
 
 
 def test_usd_per_hour() -> None:

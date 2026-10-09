@@ -1,7 +1,7 @@
 import pytest
 
 from aijobradar.rules.geo import geo_country_only, geo_residency
-from tests.rules_support import make_ctx, make_facts
+from tests.rules_support import STRONG_DESCRIPTIONS, facts_from_job, make_ctx, make_facts
 
 CTX = make_ctx()  # eligible: PT, EU, EUROPE, EMEA, WORLDWIDE
 
@@ -29,41 +29,45 @@ def test_structured_restrictions(restrictions: list[str], hit: bool) -> None:
 @pytest.mark.parametrize(
     ("fields", "hit"),
     [
-        ({"description": "This role is US only."}, True),
-        ({"description": "Please contact us only via email."}, False),
         ({"location_text": "Remote - US", "location_restrictions": ["Remote - US"]}, True),
         ({"title": "Forward Deployed Engineer - Remote, US"}, True),
+        ({"title": "Platform Engineer (US only)"}, True),
+        ({"title": "Backend Engineer (must be based in Canada)"}, True),
         ({"location_text": "Remote - Europe", "location_restrictions": ["Remote - Europe"]}, False),
-        ({"description": "You must be located in a timezone close to CET."}, False),
-        ({"description": "Only open to candidates based in the United States."}, True),
-        ({"description": "EMEA only"}, False),
-        ({"description": "Must be based in Canada."}, True),
+        ({"title": "Backend Engineer (EMEA only)"}, False),
+        ({"title": "Contact Us Only Engineer"}, False),  # "Us" is not the case-sensitive "US"
     ],
 )
-def test_text_country_only(fields: dict[str, object], hit: bool) -> None:
+def test_head_country_only(fields: dict[str, object], hit: bool) -> None:
     assert (geo_country_only(make_facts(**fields), CTX) is not None) is hit
 
 
 @pytest.mark.parametrize(
-    ("description", "hit"),
+    ("fields", "hit"),
     [
-        ("US citizens only.", True),
-        ("You must have the right to work in the UK.", True),
-        ("Candidates must be authorized to work in the United States.", True),
-        ("Work authorization in Canada is required.", True),
-        ("You need to be eligible to work in the EU.", False),  # EU is eligible here
-        ("EU timezone preferred.", False),
-        ("An active security clearance is required.", True),
-        ("No security clearance needed.", False),
+        ({"title": "Backend Engineer (US Citizens Only)"}, True),
+        ({"title": "Software Engineer - TS/SCI Clearance Required"}, True),
+        ({"title": "Backend Engineer - right to work in the UK"}, True),
+        (
+            {
+                "location_text": "Remote - US citizens only",
+                "location_restrictions": ["Remote - US citizens only"],
+            },
+            True,
+        ),
+        ({"title": "Backend Engineer (EU citizens only)"}, False),  # EU is eligible here
+        ({"title": "Security Clearance Platform Engineer"}, False),
     ],
 )
-def test_residency(description: str, hit: bool) -> None:
-    assert (geo_residency(make_facts(description=description), CTX) is not None) is hit
+def test_head_residency(fields: dict[str, object], hit: bool) -> None:
+    assert (geo_residency(make_facts(**fields), CTX) is not None) is hit
 
 
 def test_eligibility_comes_from_profile() -> None:
     us_ctx = make_ctx(eligible_places=["US", "WORLDWIDE"])
-    facts = make_facts(location_restrictions=["United States"], description="US citizens only.")
+    facts = make_facts(
+        location_restrictions=["United States"], title="Backend Engineer (US citizens only)"
+    )
     assert geo_country_only(facts, us_ctx) is None
     assert geo_residency(facts, us_ctx) is None
 
@@ -81,9 +85,8 @@ def test_eligibility_comes_from_profile() -> None:
             "location_text": "Remote (US, Canada, Europe)",
             "location_restrictions": ["Remote (US", "Canada", "Europe)"],
         },
-        {"description": "Applicants must be based in the US or Europe."},
-        {"description": "We are not US only."},
-        {"description": "Not limited to US only."},
+        {"title": "Backend Engineer - Remote, US or Europe"},
+        {"title": "Backend Engineer (not US only)"},
     ],
 )
 def test_country_only_hedged_phrases_are_not_rejected(fields: dict[str, object]) -> None:
@@ -91,16 +94,15 @@ def test_country_only_hedged_phrases_are_not_rejected(fields: dict[str, object])
 
 
 @pytest.mark.parametrize(
-    "description",
+    "title",
     [
-        "Must have the right to work in the UK or the EU.",
-        "Authorized to work in the US or EU.",
-        "No US citizenship required.",
-        "TS/SCI clearance preferred.",
+        "Backend Engineer - right to work in the UK or the EU",
+        "Software Engineer (TS/SCI clearance preferred)",
+        "Backend Engineer - no US citizenship required",
     ],
 )
-def test_residency_hedged_phrases_are_not_rejected(description: str) -> None:
-    assert geo_residency(make_facts(description=description), CTX) is None
+def test_residency_hedged_phrases_are_not_rejected(title: str) -> None:
+    assert geo_residency(make_facts(title=title), CTX) is None
 
 
 def test_multiple_foreign_places_still_reject() -> None:
@@ -110,38 +112,41 @@ def test_multiple_foreign_places_still_reject() -> None:
     assert geo_country_only(facts, CTX) is not None
 
 
-def test_nearby_word_that_is_not_an_eligible_place_still_rejects() -> None:
-    facts = make_facts(description="US citizens only. We are a European company.")
-    assert geo_residency(facts, CTX) is not None
-
-
-@pytest.mark.parametrize(
-    "description",
-    ["No remote work. US only.", "US only; EU applicants not considered."],
-)
-def test_country_only_hedges_do_not_cross_clauses(description: str) -> None:
-    assert geo_country_only(make_facts(description=description), CTX) is not None
-
-
-@pytest.mark.parametrize(
-    "description",
-    [
-        "We don't sponsor visas. US citizens only.",
-        "US citizens only. Sign-on bonus of 5k.",
-        "TS/SCI clearance required. Bonus points for Rust.",
-    ],
-)
-def test_residency_hedges_do_not_cross_clauses(description: str) -> None:
-    assert geo_residency(make_facts(description=description), CTX) is not None
-
-
 def test_location_text_alone_is_not_scanned_without_restrictions() -> None:
     # location_text is derived from the structured fields: with no restrictions it must not
     # re-introduce a narrowing that the merged geo already widened away.
     facts = make_facts(location_text="USA Only", location_restrictions=())
     assert geo_country_only(facts, CTX) is None
+    facts = make_facts(location_text="US citizens only", location_restrictions=())
+    assert geo_residency(facts, CTX) is None
 
 
 def test_location_text_with_restrictions_still_rejects() -> None:
     facts = make_facts(location_text="USA Only", location_restrictions=("United States",))
     assert geo_country_only(facts, CTX) is not None
+
+
+@pytest.mark.parametrize("description", STRONG_DESCRIPTIONS)
+def test_geo_country_only_ignores_description(description: str) -> None:
+    assert geo_country_only(facts_from_job(description), CTX) is None
+
+
+@pytest.mark.parametrize("description", STRONG_DESCRIPTIONS)
+def test_geo_residency_ignores_description(description: str) -> None:
+    assert geo_residency(facts_from_job(description), CTX) is None
+
+
+@pytest.mark.parametrize(
+    ("title", "hit"),
+    [
+        ("Backend Engineer - Remote, US hours", False),
+        ("Backend Engineer - Remote, US time zones", False),
+        ("Backend Engineer - Remote (US timezone overlap)", False),
+        ("Backend Engineer - Remote, US", True),
+        ("Backend Engineer - Remote, US, Canada", True),
+    ],
+)
+def test_country_only_time_zone_wording_is_not_a_location_restriction(
+    title: str, hit: bool
+) -> None:
+    assert (geo_country_only(make_facts(title=title), CTX) is not None) is hit

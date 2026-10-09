@@ -19,10 +19,9 @@ class RuleContext:
     eligible: frozenset[str]
     not_remote_title: tuple[re.Pattern[str], ...]
     not_remote_location: tuple[re.Pattern[str], ...]
-    not_remote_description: tuple[re.Pattern[str], ...]
     non_eng_terms: tuple[re.Pattern[str], ...]
     eng_terms: tuple[re.Pattern[str], ...]
-    employer_markers: dict[str, tuple[re.Pattern[str], ...]]
+    employer_markers: dict[str, tuple[re.Pattern[str], ...]]  # company + title
     employer_currencies: dict[str, frozenset[str]]
     geo: GeoPatterns
 
@@ -63,7 +62,6 @@ def build_rule_context(cfg: RulesConfig, profile: Profile, now: datetime) -> Rul
         eligible=frozenset(profile.eligible_places),
         not_remote_title=_compile(cfg.not_remote_title_patterns),
         not_remote_location=_compile(cfg.not_remote_location_patterns),
-        not_remote_description=_compile(cfg.not_remote_description_patterns),
         non_eng_terms=_terms(cfg.non_engineering_title_terms),
         eng_terms=_terms(cfg.engineering_title_terms),
         employer_markers={c: _compile(cfg.employer_country_markers.get(c, [])) for c in excluded},

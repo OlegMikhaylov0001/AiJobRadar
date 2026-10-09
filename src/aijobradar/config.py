@@ -91,7 +91,6 @@ class RulesConfig(BaseModel):
     case_sensitive_aliases: list[str]
     not_remote_title_patterns: list[str]
     not_remote_location_patterns: list[str]
-    not_remote_description_patterns: list[str]
     non_engineering_title_terms: list[str]
     engineering_title_terms: list[str]
     employer_country_markers: dict[str, list[str]]
