@@ -4,9 +4,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from aijobradar.db.models import Job, JobSource, Run, SourceRun
+from aijobradar.db.models import Job, JobSource, ReviewItem, RuleDecision, Run, SourceRun
 from aijobradar.dedup import Candidate
 from aijobradar.models import RawJob, SourceResult
 from aijobradar.normalize import NormalizedJob
@@ -117,11 +118,28 @@ def _widen_timezones(
     return sorted(set(current) | set(incoming))
 
 
+def _widen_job(session: Session, job_id: uuid.UUID, raw: RawJob, now: datetime) -> None:
+    """Widen the job's geo to cover this record; a rejection resting on narrower geo re-runs."""
+    geo = session.execute(
+        select(Job.location_restrictions, Job.timezone_restrictions, Job.state).where(
+            Job.id == job_id
+        )
+    ).one()
+    locations = _widen_locations(geo.location_restrictions, raw.location_restrictions)
+    timezones = _widen_timezones(geo.timezone_restrictions, raw.timezone_restrictions)
+    values: dict[str, object] = {
+        "last_seen_at": func.greatest(Job.last_seen_at, now),
+        "location_restrictions": locations,
+        "timezone_restrictions": timezones,
+    }
+    widened = (locations, timezones) != (geo.location_restrictions, geo.timezone_restrictions)
+    if widened and geo.state == "rejected":
+        values["state"] = "new"
+    session.execute(update(Job).where(Job.id == job_id).values(**values))
+
+
 def attach_source(session: Session, job_id: uuid.UUID, raw: RawJob, now: datetime) -> None:
     """Link another source record to an existing job and widen the job's geo to cover it."""
-    geo = session.execute(
-        select(Job.location_restrictions, Job.timezone_restrictions).where(Job.id == job_id)
-    ).one()
     session.add(
         JobSource(
             job_id=job_id,
@@ -132,27 +150,59 @@ def attach_source(session: Session, job_id: uuid.UUID, raw: RawJob, now: datetim
             last_seen_at=now,
         )
     )
-    session.execute(
-        update(Job)
-        .where(Job.id == job_id)
-        .values(
-            last_seen_at=func.greatest(Job.last_seen_at, now),
-            location_restrictions=_widen_locations(
-                geo.location_restrictions, raw.location_restrictions
-            ),
-            timezone_restrictions=_widen_timezones(
-                geo.timezone_restrictions, raw.timezone_restrictions
-            ),
+    _widen_job(session, job_id, raw, now)
+    session.flush()
+
+
+def touch_source(session: Session, link: JobSource, raw: RawJob, now: datetime) -> None:
+    """The same record again: its geo may have widened and its URL moved."""
+    link.last_seen_at = max(link.last_seen_at, now)
+    link.source_url = raw.source_url
+    _widen_job(session, link.job_id, raw, now)
+    session.flush()
+
+
+def jobs_in_state(session: Session, state: str) -> list[Job]:
+    return list(
+        session.scalars(select(Job).where(Job.state == state).order_by(Job.first_seen_at, Job.id))
+    )
+
+
+def record_rule_decision(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    rules_version: str,
+    hits: dict[str, str],
+    now: datetime,
+) -> None:
+    session.add(
+        RuleDecision(
+            job_id=job_id,
+            run_id=run_id,
+            rules_version=rules_version,
+            verdict="reject" if hits else "pass",
+            rule_ids=list(hits),
+            details=hits,
+            decided_at=now,
         )
     )
     session.flush()
 
 
-def touch_source(session: Session, link: JobSource, now: datetime) -> None:
-    link.last_seen_at = now
-    session.execute(
-        update(Job)
-        .where(Job.id == link.job_id)
-        .values(last_seen_at=func.greatest(Job.last_seen_at, now))
-    )
+def set_job_state(session: Session, job: Job, state: str) -> None:
+    job.state = state
     session.flush()
+
+
+def add_review_item(
+    session: Session, *, job_id: uuid.UUID, kind: str, run_id: uuid.UUID, now: datetime
+) -> bool:
+    inserted = session.execute(
+        pg_insert(ReviewItem)
+        .values(job_id=job_id, kind=kind, added_run_id=run_id, created_at=now)
+        .on_conflict_do_nothing(constraint="uq_review_queue_job_kind")
+        .returning(ReviewItem.id)
+    ).first()
+    return inserted is not None

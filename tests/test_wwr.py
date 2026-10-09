@@ -7,7 +7,7 @@ import respx
 
 from aijobradar.models import SourceStatus
 from aijobradar.sources.base import run_adapter
-from aijobradar.sources.wwr import FEED_URL, WwrAdapter, split_countries
+from aijobradar.sources.wwr import FEED_URL, WwrAdapter, region_restrictions, split_countries
 from tests.conftest import fixture_path
 
 FULL = FEED_URL.format(slug="remote-full-stack-programming-jobs")
@@ -106,3 +106,30 @@ def test_rss_channel_without_items_is_empty() -> None:
     with httpx.Client() as client:
         result = run_adapter(WwrAdapter(feeds=("remote-full-stack-programming-jobs",)), client)
     assert result.status is SourceStatus.EMPTY
+
+
+@pytest.mark.parametrize(
+    ("region", "countries", "expected"),
+    [
+        ("Anywhere in the World", [], []),
+        ("", [], []),
+        ("North America Only", [], ["North America"]),
+        ("Europe Only", [], ["Europe"]),
+        ("Anywhere in the World", ["United States of America"], ["United States of America"]),
+        ("Europe Only", ["Slovakia", "Ukraine"], ["Slovakia", "Ukraine"]),  # countries are precise
+    ],
+)
+def test_region_restrictions(region: str, countries: list[str], expected: list[str]) -> None:
+    assert region_restrictions(region, countries) == expected
+
+
+def test_region_only_item_is_restricted() -> None:
+    item = Element("item")
+    SubElement(item, "title").text = "Acme: Backend Engineer"
+    SubElement(item, "link").text = "https://weworkremotely.com/remote-jobs/acme-backend"
+    SubElement(item, "region").text = "North America Only"
+    SubElement(item, "country").text = ""
+    job = WwrAdapter().parse_record(item)
+    assert job is not None
+    assert job.location_restrictions == ["North America"]
+    assert job.location_text == "North America Only"

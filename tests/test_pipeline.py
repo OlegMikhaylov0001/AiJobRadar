@@ -1,5 +1,7 @@
 import json
+import random
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -8,6 +10,7 @@ import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from aijobradar.config import AppConfig, DedupConfig
@@ -16,12 +19,14 @@ from aijobradar.dedup import DedupOutcome
 from aijobradar.models import RawJob, SourceResult, SourceStatus
 from aijobradar.normalize import NormalizedJob
 from aijobradar.pipeline import FetchReport, RunStatus, format_report, run_fetch, run_status
+from aijobradar.rules.engine import RuleFn, RulesReport, apply_rules
 from aijobradar.sources import build_adapters
 from aijobradar.sources.base import Adapter, Fetched
 from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
 from aijobradar.sources.jobicy import API_URL, JobicyAdapter
 from aijobradar.sources.wwr import FEED_URL, WwrAdapter
 from tests.conftest import fixture_path
+from tests.rules_support import make_ctx
 
 NOW = datetime(2026, 9, 30, 6, tzinfo=UTC)
 FINISHED = datetime(2026, 9, 30, 6, 5, tzinfo=UTC)
@@ -264,3 +269,134 @@ def test_run_where_no_record_was_stored_is_failed_and_committed_as_such(session:
     run = session.get(Run, report.run_id)
     assert run is not None and run.status == "failed"
     assert run.counts == {"new": 0, "merged": 0, "seen": 0, "ingest_errors": 2}
+
+
+@respx.mock
+def test_run_with_rules_filters_and_reports(session: Session) -> None:
+    _mock_sources()
+    with httpx.Client() as client:
+        report = run_fetch(
+            session,
+            _adapters(),
+            client,
+            now=NOW,
+            dedup_cfg=DedupConfig(),
+            rules_ctx=make_ctx(),
+            rng=random.Random(0),
+        )
+    # Acme (US/Canada after merge) and Initech (NL+UK after merge) are geo-rejected;
+    # Northwind (worldwide wins on merge), Umbrella (Europe), Hooli (anywhere) pass.
+    assert report.rules is not None
+    assert (report.rules.evaluated, report.rules.rejected, report.rules.sampled) == (5, 2, 2)
+    assert report.rules.by_rule == {"R-GEO-COUNTRY-ONLY": 2}
+    run = session.get(Run, report.run_id)
+    assert run is not None
+    assert run.counts["rules_rejected"] == 2 and run.counts["review_sampled"] == 2
+    text = format_report(report)
+    assert "Отбор правилами: проверено 5, отсеяно 2 (R-GEO-COUNTRY-ONLY 2), к оценке 3" in text
+    assert "В очередь разбора отсева: 2" in text
+
+
+def test_format_report_rules_lines() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.OK,
+        sources=[],
+        outcomes={},
+        rules=RulesReport(
+            evaluated=9,
+            rejected=4,
+            by_rule=Counter({"R-STALE": 1, "R-GEO-COUNTRY-ONLY": 3, "R-NOT-REMOTE": 1}),
+            sampled=4,
+            errors=1,
+            first_error="RuntimeError",
+        ),
+    )
+    lines = format_report(report).splitlines()
+    assert lines[-2] == (
+        "Отбор правилами: проверено 9, отсеяно 4 "
+        "(R-GEO-COUNTRY-ONLY 3, R-NOT-REMOTE 1, R-STALE 1), к оценке 5, "
+        "ошибок правил 1"
+    )
+    assert lines[-1] == "В очередь разбора отсева: 4"
+
+
+def _run_with_rules(session: Session) -> FetchReport:
+    with httpx.Client() as client:
+        return run_fetch(
+            session,
+            _adapters(),
+            client,
+            now=NOW,
+            dedup_cfg=DedupConfig(),
+            rules_ctx=make_ctx(),
+            rng=random.Random(0),
+        )
+
+
+@respx.mock
+def test_rule_error_in_a_real_run_makes_it_partial(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_sources()
+    calls = {"n": 0}
+
+    def flaky(facts: object, ctx: object) -> str | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return None
+
+    rules: list[tuple[str, RuleFn]] = [("R-TEST", flaky)]
+    monkeypatch.setattr(
+        "aijobradar.pipeline.apply_rules",
+        lambda session, **kw: apply_rules(session, **{**kw, "rules": rules}),
+    )
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.PARTIAL
+    run = session.get(Run, report.run_id)
+    assert run is not None and run.status == "partial"
+    assert run.counts["rules_errors"] == 1
+    assert "ошибок правил 1" in format_report(report)
+
+
+@respx.mock
+def test_apply_rules_crash_keeps_the_ingested_run(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_sources()
+
+    def crash(*args: object, **kwargs: object) -> RulesReport:
+        raise OperationalError("x", {}, Exception())
+
+    monkeypatch.setattr("aijobradar.pipeline.apply_rules", crash)
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.PARTIAL
+    run = session.get(Run, report.run_id)
+    assert run is not None and run.status == "partial"
+    assert run.counts["rules_errors"] == 1
+    assert report.rules is not None and report.rules.first_error == "OperationalError"
+    assert len(session.scalars(select(Job)).all()) == 5  # ingested jobs survive
+
+
+@respx.mock
+def test_all_sources_failing_stays_failed_with_rules(session: Session) -> None:
+    respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
+    respx.get(API_URL).mock(return_value=httpx.Response(503))
+    respx.get(FEED_URL.format(slug="remote-full-stack-programming-jobs")).mock(
+        return_value=httpx.Response(503)
+    )
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.FAILED
+    assert report.rules is not None and report.rules.errors == 0
+
+
+@respx.mock
+def test_run_without_rules_ctx_has_no_rules_report(session: Session) -> None:
+    _mock_sources()
+    with httpx.Client() as client:
+        report = run_fetch(session, _adapters(), client, now=NOW, dedup_cfg=DedupConfig())
+    assert report.rules is None
+    run = session.get(Run, report.run_id)
+    assert run is not None
+    assert not [k for k in run.counts if k.startswith(("rules_", "review_"))]

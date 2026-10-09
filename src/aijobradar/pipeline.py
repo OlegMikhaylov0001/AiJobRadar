@@ -1,3 +1,4 @@
+import random
 import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -15,6 +16,8 @@ from aijobradar.dedup import DedupOutcome
 from aijobradar.ingest import ingest
 from aijobradar.models import SourceResult, SourceStatus
 from aijobradar.normalize import normalize
+from aijobradar.rules.context import RuleContext
+from aijobradar.rules.engine import RulesReport, apply_rules
 from aijobradar.sources.base import Adapter, run_adapter
 
 _STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: "⚠️ "}
@@ -32,6 +35,7 @@ class FetchReport:
     status: RunStatus
     sources: list[SourceResult]
     outcomes: dict[DedupOutcome, int]
+    rules: RulesReport | None = None
 
 
 def run_status(results: Sequence[SourceResult]) -> RunStatus:
@@ -79,6 +83,17 @@ def _ingest_source(
         result.error = f"{result.error}; {note}" if result.error else note
 
 
+def _apply_rules_safely(
+    session: Session, run_id: uuid.UUID, ctx: RuleContext, rng: random.Random | None
+) -> RulesReport:
+    """A failing rules step must not take the stored jobs and source statuses down with it."""
+    try:
+        with session.begin_nested():
+            return apply_rules(session, run_id=run_id, ctx=ctx, rng=rng or random.Random())
+    except Exception as exc:
+        return RulesReport(errors=1, first_error=type(exc).__name__)
+
+
 def run_fetch(
     session: Session,
     adapters: Sequence[Adapter],
@@ -87,6 +102,8 @@ def run_fetch(
     now: datetime,
     dedup_cfg: DedupConfig,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    rules_ctx: RuleContext | None = None,
+    rng: random.Random | None = None,
 ) -> FetchReport:
     """Fetch every source first (network only), then record and ingest in the database.
 
@@ -98,14 +115,32 @@ def run_fetch(
     for result in results:
         _ingest_source(session, result, run.id, now, dedup_cfg, outcomes)
         store.record_source_result(session, run.id, result)
+    rules_report: RulesReport | None = None
+    if rules_ctx is not None:
+        rules_report = _apply_rules_safely(session, run.id, rules_ctx, rng)
     status = run_status(results)
+    if rules_report and rules_report.errors and status is RunStatus.OK:
+        status = RunStatus.PARTIAL  # jobs left unprocessed are not an "ok" run
     counts = {
         outcome.value: outcomes.get(outcome, 0)
         for outcome in (DedupOutcome.NEW, DedupOutcome.MERGED, DedupOutcome.SEEN)
     }
     counts["ingest_errors"] = sum(r.ingest_errors for r in results)
+    if rules_report is not None:
+        counts.update(
+            rules_evaluated=rules_report.evaluated,
+            rules_rejected=rules_report.rejected,
+            rules_errors=rules_report.errors,
+            review_sampled=rules_report.sampled,
+        )
     store.finish_run(session, run, status.value, counts, clock())
-    return FetchReport(run_id=run.id, status=status, sources=results, outcomes=dict(outcomes))
+    return FetchReport(
+        run_id=run.id,
+        status=status,
+        sources=results,
+        outcomes=dict(outcomes),
+        rules=rules_report,
+    )
 
 
 def format_report(report: FetchReport) -> str:
@@ -128,4 +163,18 @@ def format_report(report: FetchReport) -> str:
         f"уже виденных {o.get(DedupOutcome.SEEN, 0)}, "
         f"ошибок записи {sum(r.ingest_errors for r in report.sources)}"
     )
+    if report.rules is not None:
+        rr = report.rules
+        breakdown = ", ".join(
+            f"{rule_id} {n}"
+            for rule_id, n in sorted(rr.by_rule.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        line = f"Отбор правилами: проверено {rr.evaluated}, отсеяно {rr.rejected}"
+        if breakdown:
+            line += f" ({breakdown})"
+        line += f", к оценке {rr.passed}"
+        if rr.errors:
+            line += f", ошибок правил {rr.errors}"
+        lines.append(line)
+        lines.append(f"В очередь разбора отсева: {rr.sampled}")
     return "\n".join(lines)

@@ -87,3 +87,28 @@ class JobSource(Base):
     source_url: Mapped[str] = mapped_column(Text)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RuleDecision(Base):
+    __tablename__ = "rule_decisions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    rules_version: Mapped[str] = mapped_column(String(32))
+    verdict: Mapped[str] = mapped_column(String(8))
+    rule_ids: Mapped[list[str]] = mapped_column(JSONB)
+    # Evidence per rule: third-party text and profile thresholds — DB only, never printed.
+    details: Mapped[dict[str, str]] = mapped_column(JSONB)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ReviewItem(Base):
+    __tablename__ = "review_queue"
+    __table_args__ = (UniqueConstraint("job_id", "kind", name="uq_review_queue_job_kind"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(32))
+    added_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
