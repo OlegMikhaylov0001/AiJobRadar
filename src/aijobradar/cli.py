@@ -9,17 +9,42 @@ app.add_typer(db_app, name="db")
 
 
 @app.command()
-def fetch(
+def run(
     config: Path = typer.Option(Path("config/sources.yaml"), help="Sources config (YAML)."),
+    rules: Path = typer.Option(Path("config/rules.yaml"), help="Rules config (YAML)."),
+    profile: Path = typer.Option(
+        Path("private/profile.yaml"), help="Candidate profile (YAML, kept out of git)."
+    ),
 ) -> None:
-    """Fetch jobs from all enabled sources, deduplicate and store them."""
+    """Fetch, deduplicate and store jobs, then filter them with deterministic rules."""
+    import random
+
     from sqlalchemy.orm import Session
 
-    from aijobradar.config import Settings, load_config
+    from aijobradar.config import Settings, load_config, load_rules_config
     from aijobradar.db.session import make_engine
     from aijobradar.pipeline import RunStatus, format_report, run_fetch
+    from aijobradar.profile import ProfileMissing, load_profile
+    from aijobradar.rules.context import build_rule_context
     from aijobradar.sources import build_adapters
     from aijobradar.sources.common import make_client
+
+    now = datetime.now(UTC)
+    # Profile and rules are checked before anything touches the network or the database.
+    try:
+        candidate = load_profile(profile)
+    except ProfileMissing:
+        typer.echo(
+            f"Нет файла профиля {profile}. "
+            f"Скопируйте config/profile.example.yaml в {profile} и заполните.",
+            err=True,
+        )
+        raise typer.Exit(2) from None
+    try:
+        rules_ctx = build_rule_context(load_rules_config(rules), candidate, now)
+    except ValueError as exc:
+        typer.echo(f"Профиль не согласован с {rules}: {exc}", err=True)
+        raise typer.Exit(2) from None
 
     settings = Settings()
     cfg = load_config(config)
@@ -32,7 +57,13 @@ def fetch(
         session.begin(),
     ):
         report = run_fetch(
-            session, build_adapters(cfg), client, now=datetime.now(UTC), dedup_cfg=cfg.dedup
+            session,
+            build_adapters(cfg),
+            client,
+            now=now,
+            dedup_cfg=cfg.dedup,
+            rules_ctx=rules_ctx,
+            rng=random.Random(),
         )
     typer.echo(format_report(report))
     if report.status is RunStatus.FAILED:
