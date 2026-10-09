@@ -1,0 +1,161 @@
+# Deterministic pre-LLM rules (spec §6.3). Generic and public: personal values (eligible
+# places, minimum rate, excluded employer countries) live in private/profile.yaml.
+version: "2026-10-07.1"     # bump on any change; stored with every rule decision
+stale_days: 30
+rate_margin: 0.10            # reject only when the stated ceiling is >10% below the floor
+review_sample_size: 5        # rejected jobs per run sampled into review_queue (false-reject audit)
+
+# Approximate rates, refreshed by hand; rate_margin absorbs drift.
+fx_to_usd:
+  USD: 1.0
+  EUR: 1.08
+  GBP: 1.27
+  CHF: 1.12
+  CAD: 0.73
+  AUD: 0.66
+  NZD: 0.60
+  PLN: 0.25
+  CZK: 0.044
+  SEK: 0.095
+  NOK: 0.093
+  DKK: 0.145
+  INR: 0.012
+  BRL: 0.18
+  MXN: 0.055
+  ILS: 0.27
+  AED: 0.27
+  SGD: 0.74
+  JPY: 0.0067
+  UAH: 0.024
+  RUB: 0.011
+hours_per_period: {hour: 1, day: 8, week: 40, month: 173.33, year: 2080}
+
+# Canonical place code -> aliases. Short codes that are also ordinary words are listed in
+# case_sensitive_aliases so "contact us only" is not read as "US only". Georgia is left out on
+# purpose (country vs US state).
+places:
+  US: ["US", "U.S.", "USA", "U.S.A.", "united states", "united states of america"]
+  CA: ["canada"]
+  GB: ["UK", "U.K.", "united kingdom", "great britain", "britain", "england"]
+  IE: ["ireland"]
+  DE: ["germany", "deutschland"]
+  FR: ["france"]
+  ES: ["spain"]
+  PT: ["portugal"]
+  IT: ["italy"]
+  NL: ["netherlands", "the netherlands"]
+  BE: ["belgium"]
+  CH: ["switzerland"]
+  AT: ["austria"]
+  PL: ["poland"]
+  CZ: ["czechia", "czech republic"]
+  RO: ["romania"]
+  BG: ["bulgaria"]
+  HU: ["hungary"]
+  GR: ["greece"]
+  SE: ["sweden"]
+  "NO": ["norway"]
+  DK: ["denmark"]
+  FI: ["finland"]
+  EE: ["estonia"]
+  LV: ["latvia"]
+  LT: ["lithuania"]
+  UA: ["ukraine"]
+  RS: ["serbia"]
+  HR: ["croatia"]
+  SK: ["slovakia"]
+  SI: ["slovenia"]
+  BA: ["bosnia and herzegovina"]
+  ME: ["montenegro"]
+  MD: ["moldova"]
+  CY: ["cyprus"]
+  TR: ["turkey", "türkiye"]
+  IL: ["israel"]
+  AE: ["UAE", "united arab emirates"]
+  IN: ["india"]
+  PK: ["pakistan"]
+  PH: ["philippines"]
+  VN: ["vietnam"]
+  ID: ["indonesia"]
+  MY: ["malaysia"]
+  SG: ["singapore"]
+  JP: ["japan"]
+  KR: ["south korea"]
+  CN: ["china"]
+  AU: ["australia"]
+  NZ: ["new zealand"]
+  BR: ["brazil"]
+  MX: ["mexico"]
+  AR: ["argentina"]
+  CO: ["colombia"]
+  CL: ["chile"]
+  PE: ["peru"]
+  ZA: ["south africa"]
+  NG: ["nigeria"]
+  KE: ["kenya"]
+  EG: ["egypt"]
+  AM: ["armenia"]
+  KZ: ["kazakhstan"]
+  RU: ["russia", "russian federation"]
+  BY: ["belarus"]
+  UZ: ["uzbekistan"]
+  KG: ["kyrgyzstan"]
+  AZ: ["azerbaijan"]
+  EU: ["EU", "european union"]
+  EUROPE: ["europe"]
+  EMEA: ["emea"]
+  LATAM: ["latam", "latin america", "south america"]
+  NORTH_AMERICA: ["north america", "us & canada", "usa & canada", "us/canada", "usa/canada"]
+  AMERICAS: ["americas", "the americas"]
+  APAC: ["apac", "asia pacific", "asia-pacific"]
+  ASIA: ["asia"]
+  AFRICA: ["africa"]
+  MIDDLE_EAST: ["middle east", "MENA"]
+  OCEANIA: ["oceania"]
+  CIS: ["CIS"]
+  NORDICS: ["nordics", "scandinavia"]
+  DACH: ["DACH"]
+  BALTICS: ["baltics", "baltic states"]
+  CEE: ["CEE", "central and eastern europe", "eastern europe"]
+  WORLDWIDE: ["worldwide", "anywhere", "anywhere in the world", "global", "globally"]
+case_sensitive_aliases: ["US", "U.S.", "USA", "U.S.A.", "UK", "U.K.", "EU", "UAE", "MENA", "CIS", "DACH", "CEE"]
+
+# R-NOT-REMOTE. Title: only bracketed/suffix forms ("Hybrid Cloud Engineer" is not a hybrid job).
+not_remote_title_patterns:
+  - '[(\[]\s*(?:hybrid|on-?site|in[- ]office)\s*[)\]]'
+  - '[-–|,]\s*(?:hybrid|on-?site|in[- ]office)\s*$'
+not_remote_location_patterns:
+  - '\bhybrid\b'
+  - '\bon-?site\b'
+  - '\bin[- ]office\b'
+# Description: only unambiguous phrases ("we have an office in Berlin" must pass).
+not_remote_description_patterns:
+  - '\b(?:this|the)\s+(?:role|position|job)\s+is\s+(?:a\s+)?(?:hybrid|on-?site)\b'
+  - '\bthis\s+is\s+an?\s+(?:hybrid|on-?site)\s+(?:role|position)\b'
+  - '\bhybrid\s+(?:role|position|working model|work model|schedule)\b'
+  - '\b(?:[1-5]|one|two|three|four|five)\s+days?\s+(?:a|per)\s+week\s+(?:in|at|from)\s+(?:the|our)\s+office\b'
+
+# R-NON-ENG-ROLE: matched as whole words on the normalized title; an engineering term wins.
+non_engineering_title_terms: [sales, account executive, account manager, business development,
+  marketing, marketer, seo, content writer, copywriter, recruiter, recruiting, talent acquisition,
+  sourcer, hr, people partner, designer, customer success, customer support, support specialist,
+  community manager, social media, accountant, bookkeeper, finance manager, legal, lawyer,
+  paralegal, office manager, executive assistant, virtual assistant, project coordinator, sdr, bdr]
+engineering_title_terms: [engineer, engineering, developer, programmer, architect, devops, sre,
+  qa, sdet, tester, technical, tech lead, cto, software]
+
+# R-EMPLOYER-COUNTRY: marker sets per employer country (matched case-insensitively on company,
+# title and description). Which countries are excluded is decided by the private profile.
+employer_country_markers:
+  RU:
+    - 'тк\s*рф'
+    - 'трудов\w*\s+кодекс\w*\s+рф'
+    - 'аккредитованн\w*\s+(?:it|ит)'
+    - '\bооо\s*[«"]'
+    - '\bв\s+рублях\b'
+    - '₽'
+    - '\bруб\.?(?=\s|$)'
+    - 'налогов\w*\s+резидент\w*\s+рф'
+    - 'граждан\w*\s+рф'
+employer_country_currencies:
+  RU: [RUB]

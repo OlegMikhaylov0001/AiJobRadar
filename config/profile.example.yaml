@@ -1,0 +1,5 @@
+# Copy to private/profile.yaml (gitignored) and put your own values there.
+# Everything below is fictional. Codes come from config/rules.yaml -> places.
+eligible_places: [PT, EU, EUROPE, EMEA, WORLDWIDE]   # where you can be hired from, incl. regions you accept
+excluded_employer_countries: []                      # e.g. [XX] for a country in employer_country_markers
+min_rate_usd_per_hour: 25                            # null = no rate filter

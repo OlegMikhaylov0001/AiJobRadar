@@ -75,3 +75,27 @@ class AppConfig(BaseModel):
 
 def load_config(path: Path) -> AppConfig:
     return AppConfig.model_validate(yaml.safe_load(path.read_text()) or {})
+
+
+class RulesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1)
+    stale_days: int
+    rate_margin: float
+    review_sample_size: int
+    fx_to_usd: dict[str, float]
+    hours_per_period: dict[str, float]
+    places: dict[str, list[str]]
+    case_sensitive_aliases: list[str]
+    not_remote_title_patterns: list[str]
+    not_remote_location_patterns: list[str]
+    not_remote_description_patterns: list[str]
+    non_engineering_title_terms: list[str]
+    engineering_title_terms: list[str]
+    employer_country_markers: dict[str, list[str]]
+    employer_country_currencies: dict[str, list[str]]
+
+
+def load_rules_config(path: Path) -> RulesConfig:
+    return RulesConfig.model_validate(yaml.safe_load(path.read_text()))
