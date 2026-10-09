@@ -20,6 +20,12 @@ def test_repo_rules_config_loads() -> None:
     assert cfg.employer_country_currencies["RU"] == ["RUB"]
 
 
+def test_state_and_region_names_containing_country_names_map_to_their_country() -> None:
+    cfg = load_rules_config(ROOT / "config" / "rules.yaml")
+    assert "new mexico" in cfg.places["US"]
+    assert "northern ireland" in cfg.places["GB"]
+
+
 def test_rules_config_rejects_unknown_keys(tmp_path: Path) -> None:
     text = (ROOT / "config" / "rules.yaml").read_text() + "\nstale_dayz: 3\n"
     path = tmp_path / "rules.yaml"

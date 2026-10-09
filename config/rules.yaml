@@ -32,11 +32,12 @@ hours_per_period: {hour: 1, day: 8, week: 40, month: 173.33, year: 2080}
 
 # Canonical place code -> aliases. Short codes that are also ordinary words are listed in
 # case_sensitive_aliases so "contact us only" is not read as "US only". Georgia is left out on
-# purpose (country vs US state).
+# purpose (country vs US state). State/region names that contain a country name are listed
+# explicitly so the longer alias wins over "mexico"/"ireland" ("New Mexico", "Northern Ireland").
 places:
-  US: ["US", "U.S.", "USA", "U.S.A.", "united states", "united states of america"]
+  US: ["US", "U.S.", "USA", "U.S.A.", "united states", "united states of america", "new mexico"]
   CA: ["canada"]
-  GB: ["UK", "U.K.", "united kingdom", "great britain", "britain", "england"]
+  GB: ["UK", "U.K.", "united kingdom", "great britain", "britain", "england", "northern ireland"]
   IE: ["ireland"]
   DE: ["germany", "deutschland"]
   FR: ["france"]
