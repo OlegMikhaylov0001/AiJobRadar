@@ -194,6 +194,14 @@ def test_same_record_with_widened_geo_widens_and_reopens(session: Session) -> No
     assert (job.location_restrictions, job.state) == (["Canada", "United States"], "new")
 
 
+def test_same_unsorted_record_again_keeps_rejection(session: Session) -> None:
+    raw = _raw("himalayas", "1", "Full Stack Engineer", locations=["United States", "Canada"])
+    _ingest(session, raw)
+    _set_state(session, "rejected")
+    assert _ingest(session, raw) is DedupOutcome.SEEN
+    assert session.scalars(select(Job)).one().state == "rejected"
+
+
 def test_same_record_never_narrows_geo(session: Session) -> None:
     _ingest(session, _raw("himalayas", "1", "Full Stack Engineer"))  # [] = unrestricted
     _ingest(session, _raw("himalayas", "1", "Full Stack Engineer", locations=["United States"]))

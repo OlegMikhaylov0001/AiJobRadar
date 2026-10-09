@@ -22,4 +22,4 @@ class Profile(BaseModel):
 def load_profile(path: Path) -> Profile:
     if not path.is_file():
         raise ProfileMissing(str(path))
-    return Profile.model_validate(yaml.safe_load(path.read_text()) or {})
+    return Profile.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})

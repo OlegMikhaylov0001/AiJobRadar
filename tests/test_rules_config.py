@@ -49,3 +49,24 @@ def test_profile_rejects_unknown_keys_and_empty_places() -> None:
         Profile.model_validate({"eligible_places": ["PT"], "country": "PT"})
     with pytest.raises(ValidationError):
         Profile.model_validate({"eligible_places": []})
+
+
+def test_inconsistent_profile_errors_do_not_echo_profile_codes() -> None:
+    # The message reaches CLI output and (later) public CI logs: counts only, never values.
+    from datetime import UTC, datetime
+
+    from aijobradar.rules.context import build_rule_context
+
+    cfg = load_rules_config(ROOT / "config" / "rules.yaml")
+    now = datetime(2026, 9, 30, tzinfo=UTC)
+    with pytest.raises(ValueError) as unknown:
+        build_rule_context(cfg, Profile(eligible_places=["PT", "NARNIA"]), now)
+    assert str(unknown.value) == (
+        "eligible_places: 1 code(s) missing from places in config/rules.yaml"
+    )
+    with pytest.raises(ValueError) as unsupported:
+        profile = Profile(eligible_places=["PT"], excluded_employer_countries=["RU", "ZZ"])
+        build_rule_context(cfg, profile, now)
+    assert str(unsupported.value) == (
+        "excluded_employer_countries: 1 code(s) without employer markers or currencies"
+    )

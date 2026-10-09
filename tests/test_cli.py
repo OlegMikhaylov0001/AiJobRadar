@@ -30,6 +30,7 @@ def test_run_with_inconsistent_profile_exits_2(tmp_path: Path) -> None:
     )
     assert result.exit_code == 2
     assert "Профиль не согласован" in result.output
+    assert "NARNIA" not in result.output
 
 
 def test_run_with_malformed_profile_exits_2_without_echoing_values(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from aijobradar.rules.clauses import after, before, negated, soft
 from aijobradar.rules.facts import JobFacts
 
 if TYPE_CHECKING:
@@ -29,12 +30,8 @@ _CLEARANCE = (
     r"|\bsecurity\s+clearance\s+(?:is\s+)?required\b"
     r"|\bmust\s+(?:hold|have|obtain)\s+(?:an?\s+)?(?:active\s+)?security\s+clearance\b"
 )
-_NEGATION = re.compile(r"\b(?:no|not|without|never)\b|n't", re.IGNORECASE)
-_SOFT = re.compile(r"\b(?:preferred|a\s+plus|nice\s+to\s+have|desirable|bonus)\b", re.IGNORECASE)
-_CLAUSE_END = re.compile(r"[.;!?](?=\s|$)")
-_NEARBY_PLACE = 80
-_NEGATION_REACH = 25
-_SOFT_REACH = 30
+# Sane upper bound for "same phrase" lookups; the clause boundary is what actually clips.
+_CLAUSE_REACH = 200
 
 
 @dataclass(frozen=True)
@@ -59,33 +56,11 @@ def compile_geo_patterns(place_group: str) -> GeoPatterns:
     )
 
 
-def _before(line: str, start: int, width: int) -> str:
-    """Up to `width` chars before `start`, clipped to the current clause."""
-    window = line[max(0, start - width) : start]
-    ends = list(_CLAUSE_END.finditer(window))
-    return window[ends[-1].end() :] if ends else window
-
-
-def _after(line: str, end: int, width: int) -> str:
-    """Up to `width` chars after `end`, clipped to the current clause."""
-    window = line[end : end + width]
-    stop = _CLAUSE_END.search(window)
-    return window[: stop.start()] if stop else window
-
-
-def _negated(line: str, match: re.Match[str]) -> bool:
-    return bool(_NEGATION.search(_before(line, match.start(), _NEGATION_REACH)))
-
-
-def _soft(line: str, match: re.Match[str]) -> bool:
-    return bool(_SOFT.search(_after(line, match.end(), _SOFT_REACH)))
-
-
 def _eligible_nearby(line: str, match: re.Match[str], ctx: "RuleContext") -> bool:
     """An eligible place in the same phrase ("US or Europe") makes the restriction non-exclusive."""
     windows = (
-        _before(line, match.start(), _NEARBY_PLACE),
-        _after(line, match.end(), _NEARBY_PLACE),
+        before(line, match.start(), _CLAUSE_REACH),
+        after(line, match.end(), _CLAUSE_REACH),
     )
     return any(
         ctx.gazetteer.canonical(near.group("place")) in ctx.eligible
@@ -104,11 +79,7 @@ def _foreign_place(
                 code = ctx.gazetteer.canonical(match.group("place"))
                 if code is None or code in ctx.eligible:
                     continue
-                if (
-                    _negated(line, match)
-                    or _soft(line, match)
-                    or _eligible_nearby(line, match, ctx)
-                ):
+                if negated(line, match) or soft(line, match) or _eligible_nearby(line, match, ctx):
                     continue
                 return f"{code}: {match.group(0)}"
     return None
@@ -117,7 +88,7 @@ def _foreign_place(
 def _clearance(text: str, ctx: "RuleContext") -> str | None:
     for line in text.split("\n"):
         for match in ctx.geo.clearance.finditer(line):
-            if not (_negated(line, match) or _soft(line, match)):
+            if not (negated(line, match) or soft(line, match)):
                 return f"clearance: {match.group(0)}"
     return None
 
@@ -128,7 +99,11 @@ def geo_country_only(f: JobFacts, ctx: "RuleContext") -> str | None:
         # Any unknown token (a city, "Remote") makes the restriction ambiguous: leave it to the LLM.
         if all(c is not None for c in codes) and not any(c in ctx.eligible for c in codes):
             return "restrictions: " + ", ".join(sorted({c for c in codes if c}))
-    head = f"{f.title}\n{f.location_text}"
+    # location_text is derived from the structured fields for every current source, so without
+    # restrictions it only repeats what the merged (widened) geo already dropped: e.g. a WWR
+    # "USA Only" record merged with an unrestricted twin must stay open. Title and description
+    # are still scanned.
+    head = f"{f.title}\n{f.location_text}" if f.location_restrictions else f.title
     return _foreign_place((ctx.geo.remote_place,), head, ctx) or _foreign_place(
         ctx.geo.country_only, f"{head}\n{f.description}", ctx
     )

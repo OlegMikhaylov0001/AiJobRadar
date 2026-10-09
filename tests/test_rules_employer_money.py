@@ -59,3 +59,21 @@ def test_rate_floor_off_without_profile_floor() -> None:
     ctx = make_ctx(min_rate_usd_per_hour=None)
     facts = make_facts(salary_max=1, salary_currency="USD", salary_period="hour")
     assert rate_floor(facts, ctx) is None
+
+
+@pytest.mark.parametrize(
+    ("salary_min", "salary_max", "currency", "period"),
+    [
+        (None, 0, "USD", "hour"),  # no real ceiling
+        (None, 2.5, "BRL", "month"),  # implausible: a parsing artefact, not a wage
+        (None, 120, "USD", "year"),
+        (20, 10, "USD", "hour"),  # min above max: inconsistent data
+    ],
+)
+def test_rate_floor_must_not_reject_implausible_salary(
+    salary_min: float | None, salary_max: float, currency: str, period: str
+) -> None:
+    facts = make_facts(
+        salary_min=salary_min, salary_max=salary_max, salary_currency=currency, salary_period=period
+    )
+    assert rate_floor(facts, CTX) is None

@@ -16,7 +16,12 @@ def rate_floor(f: JobFacts, ctx: RuleContext) -> str | None:
     # Only a stated ceiling proves the job pays too little; a minimum alone proves nothing.
     if floor is None or f.salary_max is None or not f.salary_currency or not f.salary_period:
         return None
+    # Implausible numbers are parsing artefacts, not wages: treat them as unknown.
+    if f.salary_max <= 0 or (f.salary_min is not None and f.salary_min > f.salary_max):
+        return None
     hourly = usd_per_hour(f.salary_max, f.salary_currency, f.salary_period, ctx.cfg)
-    if hourly is None or hourly >= floor * (1 - ctx.cfg.rate_margin):
+    if hourly is None or hourly < ctx.cfg.min_plausible_usd_per_hour:
+        return None
+    if hourly >= floor * (1 - ctx.cfg.rate_margin):
         return None
     return f"ceiling {f.salary_max:g} {f.salary_currency}/{f.salary_period} ≈ {hourly:.1f} USD/h"

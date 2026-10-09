@@ -1,9 +1,10 @@
 # Deterministic pre-LLM rules (spec §6.3). Generic and public: personal values (eligible
 # places, minimum rate, excluded employer countries) live in private/profile.yaml.
-version: "2026-10-07.1"     # bump on any change; stored with every rule decision
+version: "2026-10-09.1"     # bump on any change; stored with every rule decision
 stale_days: 30
 rate_margin: 0.10            # reject only when the stated ceiling is >10% below the floor
 review_sample_size: 5        # rejected jobs per run sampled into review_queue (false-reject audit)
+min_plausible_usd_per_hour: 2.0  # a stated ceiling below this is a parsing artefact, not a wage
 
 # Approximate rates, refreshed by hand; rate_margin absorbs drift.
 fx_to_usd:
@@ -129,11 +130,12 @@ not_remote_location_patterns:
   - '\bhybrid\b'
   - '\bon-?site\b'
   - '\bin[- ]office\b'
-# Description: only unambiguous phrases ("we have an office in Berlin" must pass).
+# Title/location: a hit is ignored when the same field also says "remote" or negates it.
+# Description: only unambiguous phrases ("we have an office in Berlin" must pass); a hit is
+# ignored when its clause is negated or hedged (remote / optional / if you / near).
 not_remote_description_patterns:
   - '\b(?:this|the)\s+(?:role|position|job)\s+is\s+(?:a\s+)?(?:hybrid|on-?site)\b'
   - '\bthis\s+is\s+an?\s+(?:hybrid|on-?site)\s+(?:role|position)\b'
-  - '\bhybrid\s+(?:role|position|working model|work model|schedule)\b'
   - '\b(?:[1-5]|one|two|three|four|five)\s+days?\s+(?:a|per)\s+week\s+(?:in|at|from)\s+(?:the|our)\s+office\b'
 
 # R-NON-ENG-ROLE: matched as whole words on the normalized title; an engineering term wins.
@@ -142,8 +144,11 @@ non_engineering_title_terms: [sales, account executive, account manager, busines
   sourcer, hr, people partner, designer, customer success, customer support, support specialist,
   community manager, social media, accountant, bookkeeper, finance manager, legal, lawyer,
   paralegal, office manager, executive assistant, virtual assistant, project coordinator, sdr, bdr]
+# Normalized forms ("full stack" -> fullstack). Bare "web" is left out on purpose: "Web Designer".
 engineering_title_terms: [engineer, engineering, developer, programmer, architect, devops, sre,
-  qa, sdet, tester, technical, tech lead, cto, software]
+  qa, sdet, tester, technical, tech lead, cto, software, backend, frontend, fullstack, data,
+  database, machine learning, ml, ai, platform, infrastructure, security, mobile, ios, android,
+  web developer, scientist, analyst]
 
 # R-EMPLOYER-COUNTRY: marker sets per employer country (matched case-insensitively on company,
 # title and description). Which countries are excluded is decided by the private profile.

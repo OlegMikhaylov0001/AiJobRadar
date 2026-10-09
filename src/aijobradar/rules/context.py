@@ -39,7 +39,10 @@ def build_rule_context(cfg: RulesConfig, profile: Profile, now: datetime) -> Rul
     gazetteer = Gazetteer(cfg.places, cfg.case_sensitive_aliases)
     unknown = set(profile.eligible_places) - gazetteer.codes
     if unknown:
-        raise ValueError(f"eligible_places has codes missing from places: {sorted(unknown)}")
+        # Counts only: this message reaches CLI output and CI logs, profile values must not.
+        raise ValueError(
+            f"eligible_places: {len(unknown)} code(s) missing from places in config/rules.yaml"
+        )
     excluded = profile.excluded_employer_countries
     unsupported = [
         c
@@ -48,7 +51,10 @@ def build_rule_context(cfg: RulesConfig, profile: Profile, now: datetime) -> Rul
     ]
     if unsupported:
         # A silently inactive exclusion would be a dishonest filter.
-        raise ValueError(f"no employer markers or currencies for: {unsupported}")
+        raise ValueError(
+            f"excluded_employer_countries: {len(unsupported)} code(s) "
+            "without employer markers or currencies"
+        )
     return RuleContext(
         cfg=cfg,
         profile=profile,

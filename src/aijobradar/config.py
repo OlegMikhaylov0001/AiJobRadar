@@ -74,7 +74,7 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: Path) -> AppConfig:
-    return AppConfig.model_validate(yaml.safe_load(path.read_text()) or {})
+    return AppConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
 
 
 class RulesConfig(BaseModel):
@@ -84,6 +84,7 @@ class RulesConfig(BaseModel):
     stale_days: int
     rate_margin: float
     review_sample_size: int
+    min_plausible_usd_per_hour: float = Field(ge=0)
     fx_to_usd: dict[str, float]
     hours_per_period: dict[str, float]
     places: dict[str, list[str]]
@@ -98,4 +99,4 @@ class RulesConfig(BaseModel):
 
 
 def load_rules_config(path: Path) -> RulesConfig:
-    return RulesConfig.model_validate(yaml.safe_load(path.read_text()))
+    return RulesConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
