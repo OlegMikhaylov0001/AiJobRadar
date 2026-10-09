@@ -64,3 +64,41 @@ def test_eligibility_comes_from_profile() -> None:
     facts = make_facts(location_restrictions=["United States"], description="US citizens only.")
     assert geo_country_only(facts, us_ctx) is None
     assert geo_residency(facts, us_ctx) is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"location_text": "Remote - US, Europe"},
+        {"location_text": "Remote - US or EU"},
+        {"location_text": "Remote - USA/Europe"},
+        {"location_text": "Remote (US, Canada, Europe)"},
+        {"description": "Applicants must be based in the US or Europe."},
+        {"description": "We are not US only."},
+        {"description": "Not limited to US only."},
+    ],
+)
+def test_country_only_hedged_phrases_are_not_rejected(fields: dict[str, str]) -> None:
+    assert geo_country_only(make_facts(**fields), CTX) is None
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Must have the right to work in the UK or the EU.",
+        "Authorized to work in the US or EU.",
+        "No US citizenship required.",
+        "TS/SCI clearance preferred.",
+    ],
+)
+def test_residency_hedged_phrases_are_not_rejected(description: str) -> None:
+    assert geo_residency(make_facts(description=description), CTX) is None
+
+
+def test_multiple_foreign_places_still_reject() -> None:
+    assert geo_country_only(make_facts(location_text="Remote - US, Canada"), CTX) is not None
+
+
+def test_nearby_word_that_is_not_an_eligible_place_still_rejects() -> None:
+    facts = make_facts(description="US citizens only. We are a European company.")
+    assert geo_residency(facts, CTX) is not None

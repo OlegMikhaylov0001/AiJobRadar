@@ -29,6 +29,11 @@ _CLEARANCE = (
     r"|\bsecurity\s+clearance\s+(?:is\s+)?required\b"
     r"|\bmust\s+(?:hold|have|obtain)\s+(?:an?\s+)?(?:active\s+)?security\s+clearance\b"
 )
+_NEGATION = re.compile(r"\b(?:no|not|without|never)\b|n't", re.IGNORECASE)
+_SOFT = re.compile(r"\b(?:preferred|a\s+plus|nice\s+to\s+have|desirable|bonus)\b", re.IGNORECASE)
+_NEARBY_PLACE = 80
+_NEGATION_REACH = 25
+_SOFT_REACH = 30
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,7 @@ class GeoPatterns:
     remote_place: re.Pattern[str]
     residency: tuple[re.Pattern[str], ...]
     clearance: re.Pattern[str]
+    any_place: re.Pattern[str]
 
 
 def compile_geo_patterns(place_group: str) -> GeoPatterns:
@@ -48,18 +54,56 @@ def compile_geo_patterns(place_group: str) -> GeoPatterns:
         remote_place=c(_REMOTE_PLACE),
         residency=tuple(c(t) for t in _RESIDENCY),
         clearance=re.compile(_CLEARANCE, re.IGNORECASE),
+        any_place=c(r"(?<![\w.]){P}(?![\w])"),
+    )
+
+
+def _negated(line: str, match: re.Match[str]) -> bool:
+    return bool(_NEGATION.search(line[max(0, match.start() - _NEGATION_REACH) : match.start()]))
+
+
+def _soft(line: str, match: re.Match[str]) -> bool:
+    return bool(_SOFT.search(line[match.end() : match.end() + _SOFT_REACH]))
+
+
+def _eligible_nearby(line: str, match: re.Match[str], ctx: "RuleContext") -> bool:
+    """An eligible place in the same phrase ("US or Europe") makes the restriction non-exclusive."""
+    windows = (
+        line[max(0, match.start() - _NEARBY_PLACE) : match.start()],
+        line[match.end() : match.end() + _NEARBY_PLACE],
+    )
+    return any(
+        ctx.gazetteer.canonical(near.group("place")) in ctx.eligible
+        for window in windows
+        for near in ctx.geo.any_place.finditer(window)
     )
 
 
 def _foreign_place(
     patterns: tuple[re.Pattern[str], ...], text: str, ctx: "RuleContext"
 ) -> str | None:
-    """First phrase whose place is known and not eligible for the candidate."""
-    for pattern in patterns:
-        for match in pattern.finditer(text):
-            code = ctx.gazetteer.canonical(match.group("place"))
-            if code is not None and code not in ctx.eligible:
+    """First explicit phrase whose place is known, not eligible, and not hedged."""
+    for line in text.split("\n"):
+        for pattern in patterns:
+            for match in pattern.finditer(line):
+                code = ctx.gazetteer.canonical(match.group("place"))
+                if code is None or code in ctx.eligible:
+                    continue
+                if (
+                    _negated(line, match)
+                    or _soft(line, match)
+                    or _eligible_nearby(line, match, ctx)
+                ):
+                    continue
                 return f"{code}: {match.group(0)}"
+    return None
+
+
+def _clearance(text: str, ctx: "RuleContext") -> str | None:
+    for line in text.split("\n"):
+        for match in ctx.geo.clearance.finditer(line):
+            if not (_negated(line, match) or _soft(line, match)):
+                return f"clearance: {match.group(0)}"
     return None
 
 
@@ -80,5 +124,4 @@ def geo_residency(f: JobFacts, ctx: "RuleContext") -> str | None:
     found = _foreign_place(ctx.geo.residency, text, ctx)
     if found:
         return found
-    clearance = ctx.geo.clearance.search(text)
-    return f"clearance: {clearance.group(0)}" if clearance else None
+    return _clearance(text, ctx)
