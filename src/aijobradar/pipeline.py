@@ -83,6 +83,17 @@ def _ingest_source(
         result.error = f"{result.error}; {note}" if result.error else note
 
 
+def _apply_rules_safely(
+    session: Session, run_id: uuid.UUID, ctx: RuleContext, rng: random.Random | None
+) -> RulesReport:
+    """A failing rules step must not take the stored jobs and source statuses down with it."""
+    try:
+        with session.begin_nested():
+            return apply_rules(session, run_id=run_id, ctx=ctx, rng=rng or random.Random())
+    except Exception as exc:
+        return RulesReport(errors=1, first_error=type(exc).__name__)
+
+
 def run_fetch(
     session: Session,
     adapters: Sequence[Adapter],
@@ -106,9 +117,7 @@ def run_fetch(
         store.record_source_result(session, run.id, result)
     rules_report: RulesReport | None = None
     if rules_ctx is not None:
-        rules_report = apply_rules(
-            session, run_id=run.id, ctx=rules_ctx, rng=rng or random.Random()
-        )
+        rules_report = _apply_rules_safely(session, run.id, rules_ctx, rng)
     status = run_status(results)
     if rules_report and rules_report.errors and status is RunStatus.OK:
         status = RunStatus.PARTIAL  # jobs left unprocessed are not an "ok" run

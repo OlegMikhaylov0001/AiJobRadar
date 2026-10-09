@@ -2,10 +2,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
+import yaml
+from pydantic import ValidationError
 
 app = typer.Typer(no_args_is_help=True, help="AiJobRadar: personal remote-job monitor.")
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 app.add_typer(db_app, name="db")
+
+
+def _validation_details(exc: ValidationError) -> str:
+    """'loc: type' pairs only: pydantic messages can echo the offending (personal) value."""
+    return "; ".join(
+        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['type']}"
+        for e in exc.errors(include_input=False)
+    )
 
 
 @app.command()
@@ -33,6 +43,12 @@ def run(
     # Profile and rules are checked before anything touches the network or the database.
     try:
         candidate = load_profile(profile)
+    except ValidationError as exc:
+        typer.echo(f"Профиль {profile} некорректен: {_validation_details(exc)}", err=True)
+        raise typer.Exit(2) from None
+    except yaml.YAMLError:
+        typer.echo(f"Профиль {profile} некорректен: не YAML", err=True)
+        raise typer.Exit(2) from None
     except ProfileMissing:
         typer.echo(
             f"Нет файла профиля {profile}. "
@@ -41,7 +57,18 @@ def run(
         )
         raise typer.Exit(2) from None
     try:
-        rules_ctx = build_rule_context(load_rules_config(rules), candidate, now)
+        rules_cfg = load_rules_config(rules)
+    except FileNotFoundError:
+        typer.echo(f"Ошибка в файле правил {rules}: файл не найден", err=True)
+        raise typer.Exit(2) from None
+    except ValidationError as exc:
+        typer.echo(f"Ошибка в файле правил {rules}: {_validation_details(exc)}", err=True)
+        raise typer.Exit(2) from None
+    except yaml.YAMLError:
+        typer.echo(f"Ошибка в файле правил {rules}: не YAML", err=True)
+        raise typer.Exit(2) from None
+    try:
+        rules_ctx = build_rule_context(rules_cfg, candidate, now)
     except ValueError as exc:
         typer.echo(f"Профиль не согласован с {rules}: {exc}", err=True)
         raise typer.Exit(2) from None

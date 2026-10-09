@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from aijobradar.config import AppConfig, DedupConfig
@@ -18,7 +19,7 @@ from aijobradar.dedup import DedupOutcome
 from aijobradar.models import RawJob, SourceResult, SourceStatus
 from aijobradar.normalize import NormalizedJob
 from aijobradar.pipeline import FetchReport, RunStatus, format_report, run_fetch, run_status
-from aijobradar.rules.engine import RulesReport
+from aijobradar.rules.engine import RuleFn, RulesReport, apply_rules
 from aijobradar.sources import build_adapters
 from aijobradar.sources.base import Adapter, Fetched
 from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
@@ -318,3 +319,84 @@ def test_format_report_rules_lines() -> None:
         "ошибок правил 1"
     )
     assert lines[-1] == "В очередь разбора отсева: 4"
+
+
+def _run_with_rules(session: Session) -> FetchReport:
+    with httpx.Client() as client:
+        return run_fetch(
+            session,
+            _adapters(),
+            client,
+            now=NOW,
+            dedup_cfg=DedupConfig(),
+            rules_ctx=make_ctx(),
+            rng=random.Random(0),
+        )
+
+
+@respx.mock
+def test_rule_error_in_a_real_run_makes_it_partial(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_sources()
+    calls = {"n": 0}
+
+    def flaky(facts: object, ctx: object) -> str | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return None
+
+    rules: list[tuple[str, RuleFn]] = [("R-TEST", flaky)]
+    monkeypatch.setattr(
+        "aijobradar.pipeline.apply_rules",
+        lambda session, **kw: apply_rules(session, **{**kw, "rules": rules}),
+    )
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.PARTIAL
+    run = session.get(Run, report.run_id)
+    assert run is not None and run.status == "partial"
+    assert run.counts["rules_errors"] == 1
+    assert "ошибок правил 1" in format_report(report)
+
+
+@respx.mock
+def test_apply_rules_crash_keeps_the_ingested_run(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_sources()
+
+    def crash(*args: object, **kwargs: object) -> RulesReport:
+        raise OperationalError("x", {}, Exception())
+
+    monkeypatch.setattr("aijobradar.pipeline.apply_rules", crash)
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.PARTIAL
+    run = session.get(Run, report.run_id)
+    assert run is not None and run.status == "partial"
+    assert run.counts["rules_errors"] == 1
+    assert report.rules is not None and report.rules.first_error == "OperationalError"
+    assert len(session.scalars(select(Job)).all()) == 5  # ingested jobs survive
+
+
+@respx.mock
+def test_all_sources_failing_stays_failed_with_rules(session: Session) -> None:
+    respx.get(SEARCH_URL).mock(return_value=httpx.Response(503))
+    respx.get(API_URL).mock(return_value=httpx.Response(503))
+    respx.get(FEED_URL.format(slug="remote-full-stack-programming-jobs")).mock(
+        return_value=httpx.Response(503)
+    )
+    report = _run_with_rules(session)
+    assert report.status is RunStatus.FAILED
+    assert report.rules is not None and report.rules.errors == 0
+
+
+@respx.mock
+def test_run_without_rules_ctx_has_no_rules_report(session: Session) -> None:
+    _mock_sources()
+    with httpx.Client() as client:
+        report = run_fetch(session, _adapters(), client, now=NOW, dedup_cfg=DedupConfig())
+    assert report.rules is None
+    run = session.get(Run, report.run_id)
+    assert run is not None
+    assert not [k for k in run.counts if k.startswith(("rules_", "review_"))]
