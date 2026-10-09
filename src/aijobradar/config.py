@@ -29,8 +29,9 @@ class HimalayasConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    max_pages: int = Field(10, ge=1)
-    lookback_days: int = Field(3, ge=1)
+    max_pages: int = Field(500, ge=1)
+    lookback_hours: int = Field(30, ge=1)
+    page_delay_s: float = Field(0.5, ge=0)
     parent_categories: list[str] = Field(default_factory=lambda: ["Developer"])
 
 

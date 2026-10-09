@@ -48,7 +48,8 @@ def test_unknown_config_keys_are_rejected(raw: dict[str, object]) -> None:
     "raw",
     [
         {"himalayas": {"max_pages": 0}},
-        {"himalayas": {"lookback_days": 0}},
+        {"himalayas": {"lookback_hours": 0}},
+        {"himalayas": {"page_delay_s": -1}},
         {"jobicy": {"count": 0}},
         {"jobicy": {"industries": []}},
         {"wwr": {"feeds": []}},

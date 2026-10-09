@@ -3,8 +3,7 @@
   "updatedAt": 1790640000,
   "offset": 0,
   "limit": 20,
-  "totalCount": 6,
-  "nextCursor": "cursor-2",
+  "totalCount": 25,
   "jobs": [
     {
       "title": "Senior Backend Engineer",

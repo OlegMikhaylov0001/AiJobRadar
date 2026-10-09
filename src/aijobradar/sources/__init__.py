@@ -11,7 +11,8 @@ def build_adapters(cfg: AppConfig) -> list[Adapter]:
         adapters.append(
             HimalayasAdapter(
                 max_pages=cfg.himalayas.max_pages,
-                lookback_days=cfg.himalayas.lookback_days,
+                lookback_hours=cfg.himalayas.lookback_hours,
+                page_delay_s=cfg.himalayas.page_delay_s,
                 parent_categories=tuple(cfg.himalayas.parent_categories),
             )
         )
