@@ -150,3 +150,59 @@ def test_last_seen_never_moves_backwards(session: Session) -> None:
     assert _job(session).last_seen_at == later
     _ingest(session, _raw("jobicy", "1", "Full Stack Engineer"), NOW)  # seen with an older clock
     assert _job(session).last_seen_at == later
+
+
+def _set_state(session: Session, state: str) -> None:
+    job = session.scalars(select(Job)).one()
+    store.set_job_state(session, job, state)
+
+
+def test_widened_geo_reopens_rejected_job(session: Session) -> None:
+    us = _raw("himalayas", "1", "Full Stack Engineer")
+    us = us.model_copy(update={"location_restrictions": ["United States"]})
+    _ingest(session, us)
+    _set_state(session, "rejected")
+    worldwide = _raw("wwr", "a", "Full Stack Engineer")  # [] = unrestricted
+    assert _ingest(session, worldwide) is DedupOutcome.MERGED
+    assert session.scalars(select(Job)).one().state == "new"
+
+
+def test_unchanged_geo_keeps_rejection(session: Session) -> None:
+    us = _raw("himalayas", "1", "Full Stack Engineer")
+    us = us.model_copy(update={"location_restrictions": ["United States"]})
+    _ingest(session, us)
+    _set_state(session, "rejected")
+    _ingest(session, us.model_copy(update={"source": "wwr", "source_job_id": "a"}))
+    assert session.scalars(select(Job)).one().state == "rejected"
+
+
+def test_widening_does_not_touch_pending_job(session: Session) -> None:
+    us = _raw("himalayas", "1", "Full Stack Engineer")
+    us = us.model_copy(update={"location_restrictions": ["United States"]})
+    _ingest(session, us)
+    _set_state(session, "pending_score")
+    _ingest(session, _raw("wwr", "a", "Full Stack Engineer"))
+    assert session.scalars(select(Job)).one().state == "pending_score"
+
+
+def test_same_record_with_widened_geo_widens_and_reopens(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Full Stack Engineer", locations=["United States"]))
+    _set_state(session, "rejected")
+    again = _raw("himalayas", "1", "Full Stack Engineer", locations=["United States", "Canada"])
+    assert _ingest(session, again) is DedupOutcome.SEEN
+    job = session.scalars(select(Job)).one()
+    assert (job.location_restrictions, job.state) == (["Canada", "United States"], "new")
+
+
+def test_same_record_never_narrows_geo(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Full Stack Engineer"))  # [] = unrestricted
+    _ingest(session, _raw("himalayas", "1", "Full Stack Engineer", locations=["United States"]))
+    assert session.scalars(select(Job)).one().location_restrictions == []
+
+
+def test_same_record_updates_url_and_last_seen_never_goes_back(session: Session) -> None:
+    _ingest(session, _raw("himalayas", "1", "Full Stack Engineer"))
+    moved = _raw("himalayas", "1", "Full Stack Engineer", url="https://himalayas/moved")
+    _ingest(session, moved, now=NOW - timedelta(days=1))  # an older run replayed late
+    link = session.scalars(select(JobSource)).one()
+    assert (link.source_url, link.last_seen_at) == ("https://himalayas/moved", NOW)

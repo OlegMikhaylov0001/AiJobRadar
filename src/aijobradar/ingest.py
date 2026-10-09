@@ -15,7 +15,7 @@ def ingest(
     raw = job.raw
     link = store.find_source(session, raw.source, raw.source_job_id)
     if link is not None:
-        store.touch_source(session, link, now)
+        store.touch_source(session, link, raw, now)
         return DedupOutcome.SEEN
 
     since = now - timedelta(days=cfg.match_window_days)
