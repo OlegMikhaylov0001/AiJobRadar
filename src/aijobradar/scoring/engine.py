@@ -179,11 +179,15 @@ def _record(
             parked = _write(session, pending, result, score, run_id, ver, cfg, now)
             break
         except IntegrityError as exc:
-            # Another writer already stored this key (e.g. a concurrent run): the database works.
             session.rollback()
-            report.error += 1
             report.first_error = report.first_error or type(exc).__name__
-            return True
+            # Safe only if another writer really stored an ok score for this key (a concurrent
+            # run). Any other integrity error (e.g. a foreign key) lost the result: fail closed.
+            if _adopt_existing_score(session, pending, ver):
+                report.cached += pending.size
+                return True
+            report.error += 1
+            return False
         except Exception as exc:
             session.rollback()
             if attempt + 1 == _WRITE_ATTEMPTS:
@@ -203,6 +207,26 @@ def _record(
     if parked:
         report.parked += pending.size
     report.first_error = report.first_error or result.error
+    return True
+
+
+def _adopt_existing_score(session: Session, pending: _Pending, ver: _Key) -> bool:
+    try:
+        existing = store.find_ok_score(
+            session,
+            input_hash=pending.key,
+            prompt_version=ver.prompt_version,
+            model=ver.model,
+            profile_version_id=ver.profile_version_id,
+        )
+        if existing is None:
+            return False
+        for job in (pending.job, *pending.followers):
+            store.set_job_state(session, job, "scored")
+        session.commit()
+    except Exception:
+        session.rollback()
+        return False
     return True
 
 

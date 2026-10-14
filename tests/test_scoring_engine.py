@@ -243,16 +243,40 @@ def test_broken_db_stops_further_paid_calls(
     assert states == ["pending_score", "pending_score", "scored"]
 
 
-def test_conflicting_write_is_not_retried_and_does_not_stop_the_run(
+def test_foreign_key_violation_is_a_lost_write_and_stops_the_run(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_id, profile, _ = _setup(session, 3)
     cfg = CFG.model_copy(update={"parallelism": 1})
-    _flaky_writes(monkeypatch, {1}, IntegrityError("INSERT", {}, Exception("duplicate key")))
+    # No ok row exists for the key: an integrity error here is not a harmless race.
+    _flaky_writes(monkeypatch, {1}, IntegrityError("INSERT", {}, Exception("fk violation")))
     scorer = _scorer(_ok())
     report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
-    assert (report.ok, report.error, report.skipped_db_error, len(scorer.calls)) == (2, 1, 0, 3)
+    assert (report.ok, report.error, report.skipped_db_error, len(scorer.calls)) == (0, 1, 2, 1)
     assert report.first_error == "IntegrityError"
+    assert {j.state for j in session.scalars(select(Job))} == {"pending_score"}
+
+
+def test_race_with_a_stored_ok_score_is_adopted_and_the_run_goes_on(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, profile, jobs = _setup(session, 2)
+    cfg = CFG.model_copy(update={"parallelism": 1})
+    real = store.record_llm_score
+
+    def racing(*args: Any, **kwargs: Any) -> None:
+        # A concurrent run commits the same key first; our own insert then conflicts.
+        monkeypatch.setattr(store, "record_llm_score", real)
+        real(*args, **kwargs)
+        session.commit()
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "record_llm_score", racing)
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    assert (report.ok, report.cached, report.error, report.skipped_db_error) == (1, 1, 0, 0)
+    assert len(scorer.calls) == 2
+    assert {j.state for j in session.scalars(select(Job))} == {"scored"}
 
 
 def _twins(session: Session) -> tuple[uuid.UUID, Any]:
