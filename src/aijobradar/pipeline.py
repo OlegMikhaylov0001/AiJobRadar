@@ -1,3 +1,4 @@
+import dataclasses
 import random
 import uuid
 from collections import Counter
@@ -18,6 +19,7 @@ from aijobradar.models import SourceResult, SourceStatus
 from aijobradar.normalize import normalize
 from aijobradar.rules.context import RuleContext
 from aijobradar.rules.engine import RulesReport, apply_rules
+from aijobradar.scoring.engine import ScoringReport
 from aijobradar.sources.base import Adapter, run_adapter
 
 _STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: "⚠️ "}
@@ -36,6 +38,7 @@ class FetchReport:
     sources: list[SourceResult]
     outcomes: dict[DedupOutcome, int]
     rules: RulesReport | None = None
+    scoring: ScoringReport | None = None
 
 
 def run_status(results: Sequence[SourceResult]) -> RunStatus:
@@ -143,6 +146,45 @@ def run_fetch(
     )
 
 
+def scoring_counts(scoring: ScoringReport) -> dict[str, float | int]:
+    return {
+        "llm_ok": scoring.ok,
+        "llm_cached": scoring.cached,
+        "llm_invalid_output": scoring.invalid_output,
+        "llm_refused": scoring.refused,
+        "llm_error": scoring.error,
+        "llm_skipped_budget": scoring.skipped_budget,
+        "llm_skipped_db_error": scoring.skipped_db_error,
+        "llm_parked": scoring.parked,
+        "llm_est_cost_usd": scoring.est_cost_usd,
+    }
+
+
+def apply_scoring_result(report: FetchReport, scoring: ScoringReport) -> FetchReport:
+    status = report.status
+    if scoring.failed and status is RunStatus.OK:
+        status = RunStatus.PARTIAL  # jobs the model could not score are not an "ok" run
+    return dataclasses.replace(report, status=status, scoring=scoring)
+
+
+def format_scoring_line(s: ScoringReport) -> str:
+    parts = [f"{s.ok} ok"]
+    for count, label in (
+        (s.cached, "из кэша"),
+        (s.invalid_output, "invalid_output"),
+        (s.refused, "refused"),
+        (s.error, "error"),
+        (s.skipped_budget, "skipped_budget"),
+        (s.skipped_db_error, "не отправлено: БД не принимает результаты"),
+        (s.parked, "отложено после попыток"),
+    ):
+        if count:
+            parts.append(f"{count} {label}")
+    if s.failed and s.first_error:
+        parts.append(f"первая ошибка: {s.first_error}")
+    return "LLM: " + " · ".join(parts) + f" · ≈${s.est_cost_usd:.2f} (оценка по API-ценам)"
+
+
 def format_report(report: FetchReport) -> str:
     lines = [f"Прогон: {report.status.value} ({report.run_id})"]
     for r in report.sources:
@@ -177,4 +219,6 @@ def format_report(report: FetchReport) -> str:
             line += f", ошибок правил {rr.errors}"
         lines.append(line)
         lines.append(f"В очередь разбора отсева: {rr.sampled}")
+    if report.scoring is not None:
+        lines.append(format_scoring_line(report.scoring))
     return "\n".join(lines)

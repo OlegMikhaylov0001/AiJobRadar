@@ -8,10 +8,12 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -112,3 +114,51 @@ class ReviewItem(Base):
     kind: Mapped[str] = mapped_column(String(32))
     added_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProfileVersion(Base):
+    __tablename__ = "profile_versions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Personal: the candidate's resume and targets. DB only, never printed.
+    resume_md: Mapped[str] = mapped_column(Text)
+    targets_md: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class LlmScore(Base):
+    __tablename__ = "llm_scores"
+    __table_args__ = (
+        # Cache and "never pay twice": one ok score per exact model input.
+        Index(
+            "uq_llm_scores_ok_key",
+            "input_hash",
+            "prompt_version",
+            "model",
+            "profile_version_id",
+            unique=True,
+            postgresql_where=text("status = 'ok'"),
+        ),
+        Index("ix_llm_scores_key", "input_hash", "prompt_version", "model", "profile_version_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(64))
+    profile_version_id: Mapped[int] = mapped_column(ForeignKey("profile_versions.id"))
+    status: Mapped[str] = mapped_column(String(16))
+    axes: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    final_score: Mapped[float | None] = mapped_column(Float)
+    why_fit: Mapped[str | None] = mapped_column(Text)
+    main_risk: Mapped[str | None] = mapped_column(Text)
+    gaps: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    est_cost_usd: Mapped[float | None] = mapped_column(Float)
+    raw_output: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

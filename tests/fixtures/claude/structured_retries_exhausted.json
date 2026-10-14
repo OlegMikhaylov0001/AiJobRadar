@@ -1,0 +1,6 @@
+{"type": "result", "subtype": "error_max_structured_output_retries", "is_error": true,
+ "stop_reason": "tool_use", "terminal_reason": "structured_output_retry_exhausted",
+ "total_cost_usd": 0.3,
+ "usage": {"input_tokens": 15000, "cache_creation_input_tokens": 300,
+ "cache_read_input_tokens": 0, "output_tokens": 1200},
+ "structured_output": null, "result": "job text echoed here"}

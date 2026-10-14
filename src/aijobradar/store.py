@@ -1,16 +1,33 @@
 """All database reads and writes. Nothing else in the package touches the ORM session."""
 
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from aijobradar.db.models import Job, JobSource, ReviewItem, RuleDecision, Run, SourceRun
+from aijobradar.db.models import (
+    Job,
+    JobSource,
+    LlmScore,
+    ProfileVersion,
+    ReviewItem,
+    RuleDecision,
+    Run,
+    SourceRun,
+)
 from aijobradar.dedup import Candidate
 from aijobradar.models import RawJob, SourceResult
 from aijobradar.normalize import NormalizedJob
+
+if TYPE_CHECKING:
+    from sqlalchemy import CursorResult
+
+    from aijobradar.scoring.claude_cli import ScoreResult
 
 
 def start_run(session: Session, kind: str, now: datetime) -> Run:
@@ -21,11 +38,23 @@ def start_run(session: Session, kind: str, now: datetime) -> Run:
 
 
 def finish_run(
-    session: Session, run: Run, status: str, counts: dict[str, int], now: datetime
+    session: Session, run: Run, status: str, counts: Mapping[str, float | int], now: datetime
 ) -> None:
     run.status = status
-    run.counts = counts
+    run.counts = dict(counts)
     run.finished_at = now
+    session.flush()
+
+
+def update_run_result(
+    session: Session, run_id: uuid.UUID, *, status: str, extra_counts: Mapping[str, float | int]
+) -> None:
+    """Add counters to a finished run (e.g. scoring after fetch) and set its final status."""
+    run = session.get(Run, run_id)
+    if run is None:
+        raise LookupError("run not found")
+    run.status = status
+    run.counts = {**run.counts, **extra_counts}
     session.flush()
 
 
@@ -196,6 +225,29 @@ def set_job_state(session: Session, job: Job, state: str) -> None:
     session.flush()
 
 
+def reopen_rejected_from_other_versions(session: Session, current_version: str) -> int:
+    """Rejections are final per rules version; a new version deserves a second look.
+
+    Only the latest rule decision of a job counts. A rejected job with no rule decision at all
+    has no version to compare and is left alone.
+    """
+    latest = (
+        select(RuleDecision.job_id, RuleDecision.rules_version)
+        .ext(distinct_on(RuleDecision.job_id))
+        .order_by(RuleDecision.job_id, RuleDecision.decided_at.desc(), RuleDecision.id.desc())
+        .subquery()
+    )
+    stale = select(latest.c.job_id).where(latest.c.rules_version != current_version)
+    result = session.execute(
+        update(Job)
+        .where(Job.state == "rejected", Job.id.in_(stale))
+        .values(state="new")
+        .execution_options(synchronize_session="fetch")  # loaded Job objects see the new state
+    )
+    session.flush()
+    return cast("CursorResult[Any]", result).rowcount or 0
+
+
 def add_review_item(
     session: Session, *, job_id: uuid.UUID, kind: str, run_id: uuid.UUID, now: datetime
 ) -> bool:
@@ -206,3 +258,99 @@ def add_review_item(
         .returning(ReviewItem.id)
     ).first()
     return inserted is not None
+
+
+def latest_profile_version(session: Session) -> ProfileVersion | None:
+    return session.scalars(
+        select(ProfileVersion).order_by(ProfileVersion.id.desc()).limit(1)
+    ).first()
+
+
+def add_profile_version(
+    session: Session, *, resume_md: str, targets_md: str, note: str | None, now: datetime
+) -> tuple[ProfileVersion, bool]:
+    """A new version only when the text changed: scores are cached per profile version."""
+    latest = latest_profile_version(session)
+    if latest is not None and (latest.resume_md, latest.targets_md) == (resume_md, targets_md):
+        return latest, False
+    version = ProfileVersion(created_at=now, resume_md=resume_md, targets_md=targets_md, note=note)
+    session.add(version)
+    session.flush()
+    return version, True
+
+
+def _score_key(input_hash: str, prompt_version: str, model: str, profile_version_id: int) -> Any:
+    return (
+        (LlmScore.input_hash == input_hash)
+        & (LlmScore.prompt_version == prompt_version)
+        & (LlmScore.model == model)
+        & (LlmScore.profile_version_id == profile_version_id)
+    )
+
+
+def find_ok_score(
+    session: Session, *, input_hash: str, prompt_version: str, model: str, profile_version_id: int
+) -> LlmScore | None:
+    return session.scalars(
+        select(LlmScore).where(
+            _score_key(input_hash, prompt_version, model, profile_version_id),
+            LlmScore.status == "ok",
+        )
+    ).first()
+
+
+def count_failed_attempts(
+    session: Session, *, input_hash: str, prompt_version: str, model: str, profile_version_id: int
+) -> int:
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(LlmScore)
+            .where(
+                _score_key(input_hash, prompt_version, model, profile_version_id),
+                # Only answers the model gave and failed count against the job; a timeout or
+                # an outdated CLI is not the job's fault and must not park it.
+                LlmScore.status.in_(("invalid_output", "refused")),
+            )
+        )
+        or 0
+    )
+
+
+def record_llm_score(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    input_hash: str,
+    prompt_version: str,
+    model: str,
+    profile_version_id: int,
+    result: "ScoreResult",
+    final_score: float | None,
+    now: datetime,
+) -> None:
+    axes = result.axes
+    session.add(
+        LlmScore(
+            job_id=job_id,
+            run_id=run_id,
+            input_hash=input_hash,
+            prompt_version=prompt_version,
+            model=model,
+            profile_version_id=profile_version_id,
+            status=result.status.value,
+            axes=axes.model_dump(exclude={"why_fit", "main_risk", "gaps"}) if axes else None,
+            final_score=final_score,
+            why_fit=axes.why_fit if axes else None,
+            main_risk=axes.main_risk if axes else None,
+            gaps=axes.gaps if axes else None,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            est_cost_usd=result.est_cost_usd,
+            raw_output=result.raw_output,
+            error=result.error,
+            scored_at=now,
+        )
+    )
+    session.flush()

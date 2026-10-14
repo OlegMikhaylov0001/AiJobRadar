@@ -44,7 +44,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rapidfuzz", specifier = ">=3.9" },
-    { name = "sqlalchemy", specifier = ">=2.0.30" },
+    { name = "sqlalchemy", specifier = ">=2.1" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

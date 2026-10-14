@@ -1,0 +1,24 @@
+# LLM scoring (spec §7–§8). Generic and public: the candidate profile lives in the database
+# (aijobradar profile import private/resume.md private/targets.md).
+model: claude-opus-5-5
+prompt_version: score-v1          # config/prompts/<prompt_version>.md; bump on any prompt change
+timeout_s: 120
+parallelism: 3
+max_items_per_run: 80
+max_est_cost_usd_per_run: 3.0     # soft cap, checked before each wave (one wave may pass it); estimate in API prices, not a charge
+max_attempts: 2                   # failed attempts per job before it is parked as score_failed
+max_description_chars: 12000
+
+# final_score = 100 * weighted mean of the 0-4 axes, minus penalties, plus bonuses, clamped
+# to 0-100. geo_eligible=no or employer_country_excluded=yes -> 0 (combine.py).
+weights: {skills_match: 0.35, target_fit: 0.25, seniority_fit: 0.2, domain_match: 0.2}
+penalties:
+  geo_eligible_unclear: 15
+  employer_country_excluded_unclear: 10
+  timezone_risk_medium: 10
+  timezone_risk_high: 25
+  english_risk_medium: 5
+  english_risk_high: 15
+  comp_ok_no: 20
+bonuses:
+  preferred_language_yes: 5
