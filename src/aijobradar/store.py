@@ -1,7 +1,7 @@
 """All database reads and writes. Nothing else in the package touches the ORM session."""
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -11,8 +11,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from aijobradar.db.models import (
+    Delivery,
     Job,
     JobSource,
+    Kv,
+    Label,
     LlmScore,
     ProfileVersion,
     ReviewItem,
@@ -329,28 +332,95 @@ def record_llm_score(
     result: "ScoreResult",
     final_score: float | None,
     now: datetime,
-) -> None:
+) -> int:
     axes = result.axes
-    session.add(
-        LlmScore(
-            job_id=job_id,
-            run_id=run_id,
-            input_hash=input_hash,
-            prompt_version=prompt_version,
-            model=model,
-            profile_version_id=profile_version_id,
-            status=result.status.value,
-            axes=axes.model_dump(exclude={"why_fit", "main_risk", "gaps"}) if axes else None,
-            final_score=final_score,
-            why_fit=axes.why_fit if axes else None,
-            main_risk=axes.main_risk if axes else None,
-            gaps=axes.gaps if axes else None,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            est_cost_usd=result.est_cost_usd,
-            raw_output=result.raw_output,
-            error=result.error,
-            scored_at=now,
-        )
+    row = LlmScore(
+        job_id=job_id,
+        run_id=run_id,
+        input_hash=input_hash,
+        prompt_version=prompt_version,
+        model=model,
+        profile_version_id=profile_version_id,
+        status=result.status.value,
+        axes=axes.model_dump(exclude={"why_fit", "main_risk", "gaps"}) if axes else None,
+        final_score=final_score,
+        why_fit=axes.why_fit if axes else None,
+        main_risk=axes.main_risk if axes else None,
+        gaps=axes.gaps if axes else None,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        est_cost_usd=result.est_cost_usd,
+        raw_output=result.raw_output,
+        error=result.error,
+        scored_at=now,
     )
+    session.add(row)
     session.flush()
+    return row.id
+
+
+def mark_scored(session: Session, jobs: Sequence[Job], score_id: int) -> None:
+    for job in jobs:
+        job.state = "scored"
+        job.llm_score_id = score_id
+    session.flush()
+
+
+def create_delivery(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    slot: str,
+    position: int,
+    now: datetime,
+) -> Delivery:
+    delivery = Delivery(job_id=job_id, run_id=run_id, slot=slot, position=position, sent_at=now)
+    session.add(delivery)
+    session.flush()
+    return delivery
+
+
+def add_label(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    label: str,
+    source: str,
+    source_ref: str | None,
+    now: datetime,
+) -> bool:
+    inserted = session.execute(
+        pg_insert(Label)
+        .values(job_id=job_id, label=label, source=source, source_ref=source_ref, created_at=now)
+        .on_conflict_do_nothing(constraint="uq_labels_source_ref")
+        .returning(Label.id)
+    ).first()
+    return inserted is not None
+
+
+def get_kv(session: Session, key: str) -> str | None:
+    row = session.get(Kv, key)
+    return row.value if row is not None else None
+
+
+def set_kv(session: Session, key: str, value: str) -> None:
+    session.execute(
+        pg_insert(Kv)
+        .values(key=key, value=value)
+        .on_conflict_do_update(index_elements=[Kv.key], set_={"value": value})
+    )
+
+
+def job_sources(session: Session, job_id: uuid.UUID) -> list[JobSource]:
+    return list(
+        session.scalars(select(JobSource).where(JobSource.job_id == job_id).order_by(JobSource.id))
+    )
+
+
+def last_source_success(session: Session, source: str) -> datetime | None:
+    return session.scalar(
+        select(func.max(Run.started_at))
+        .join(SourceRun, SourceRun.run_id == Run.id)
+        .where(SourceRun.source == source, SourceRun.status == "ok")
+    )

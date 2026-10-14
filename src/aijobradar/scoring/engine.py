@@ -104,17 +104,15 @@ def score_pending(
     for job in _newest_first(store.jobs_in_state(session, "pending_score")):
         rendered = render_job(job, cfg.max_description_chars)
         key = input_hash(rendered)
-        if (
-            store.find_ok_score(
-                session,
-                input_hash=key,
-                prompt_version=ver.prompt_version,
-                model=ver.model,
-                profile_version_id=ver.profile_version_id,
-            )
-            is not None
-        ):
-            store.set_job_state(session, job, "scored")
+        cached = store.find_ok_score(
+            session,
+            input_hash=key,
+            prompt_version=ver.prompt_version,
+            model=ver.model,
+            profile_version_id=ver.profile_version_id,
+        )
+        if cached is not None:
+            store.mark_scored(session, [job], cached.id)
             report.cached += 1
         elif (
             store.count_failed_attempts(
@@ -221,8 +219,7 @@ def _adopt_existing_score(session: Session, pending: _Pending, ver: _Key) -> boo
         )
         if existing is None:
             return False
-        for job in (pending.job, *pending.followers):
-            store.set_job_state(session, job, "scored")
+        store.mark_scored(session, [pending.job, *pending.followers], existing.id)
         session.commit()
     except Exception:
         session.rollback()
@@ -241,7 +238,7 @@ def _write(
     now: datetime,
 ) -> bool:
     """Store one paid result in its own transaction; True if the job was parked by it."""
-    store.record_llm_score(
+    row_id = store.record_llm_score(
         session,
         job_id=pending.job_id,
         run_id=run_id,
@@ -253,9 +250,9 @@ def _write(
         final_score=score,
         now=now,
     )
-    state: str | None = None
+    parked = False
     if result.status is ScoreStatus.OK:
-        state = "scored"
+        store.mark_scored(session, [pending.job, *pending.followers], row_id)
     elif result.status in (ScoreStatus.INVALID_OUTPUT, ScoreStatus.REFUSED):
         failed = store.count_failed_attempts(
             session,
@@ -264,10 +261,9 @@ def _write(
             model=ver.model,
             profile_version_id=ver.profile_version_id,
         )
-        if failed >= cfg.max_attempts:
-            state = "score_failed"  # park now, not one run later
-    if state is not None:
-        for job in (pending.job, *pending.followers):
-            store.set_job_state(session, job, state)
+        if failed >= cfg.max_attempts:  # park now, not one run later
+            parked = True
+            for job in (pending.job, *pending.followers):
+                store.set_job_state(session, job, "score_failed")
     session.commit()  # a paid result must survive a later failure
-    return state == "score_failed"
+    return parked
