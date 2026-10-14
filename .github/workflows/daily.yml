@@ -1,0 +1,54 @@
+name: daily
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "At most N model calls (empty = config default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write   # keepalive: re-enable the scheduled workflows
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --locked
+      - name: Claude Code (pinned)
+        run: npm install --global @anthropic-ai/claude-code@2.1.287
+      - name: Rules profile from secret
+        env:
+          PROFILE_YAML: ${{ secrets.PROFILE_YAML }}
+        run: |
+          mkdir -p private
+          umask 077
+          printf '%s\n' "$PROFILE_YAML" > private/profile.yaml
+      - run: uv run aijobradar db upgrade
+      - name: Fetch, rules, score, deliver
+        env:
+          LIMIT: ${{ inputs.limit }}
+        run: uv run aijobradar run --deliver ${LIMIT:+--limit "$LIMIT"}
+      - name: Keepalive (scheduled workflows stop after 60 days without repo activity)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow enable daily.yml --repo "$GITHUB_REPOSITORY"
+          gh workflow enable labels.yml --repo "$GITHUB_REPOSITORY"
