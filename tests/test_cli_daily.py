@@ -16,12 +16,12 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner, Result
 
 from aijobradar import store
-from aijobradar.cli import _LOCK_ID, app
+from aijobradar.cli import _LABELS_LOCK_ID, _LOCK_ID, app
 from aijobradar.db.models import Delivery, Label
 from aijobradar.models import RawJob, SourceResult, SourceStatus
 from aijobradar.normalize import normalize
@@ -40,7 +40,7 @@ from tests.cli_support import (
     seed_fresh_pending,
     write_run_files,
 )
-from tests.conftest import fixture_path
+from tests.conftest import TEST_DATABASE_URL, fixture_path
 from tests.test_scoring_engine import AXES
 
 # Routes registered to prove a request was NOT made are, by design, never called.
@@ -288,6 +288,176 @@ def test_daily_database_down_sends_crash_and_exits_1(
     _assert_no_leaks(result.output)
 
 
+def test_run_migrate_applies_migrations_before_fetching(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    mock_fetch(respx_mock)
+    urls: list[str] = []
+    monkeypatch.setattr("aijobradar.db.migrate.upgrade", urls.append)
+
+    args = [*write_run_files(tmp_path, scoring_path), "--no-score"]
+    result = CliRunner().invoke(app, [*args, "--migrate"])
+
+    assert result.exit_code == 0, result.output
+    assert urls == [TEST_DATABASE_URL]
+    assert len(runs_of(cli_db, "fetch")) == 1
+
+
+def test_run_without_migrate_does_not_touch_migrations(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    mock_fetch(respx_mock)
+    urls: list[str] = []
+    monkeypatch.setattr("aijobradar.db.migrate.upgrade", urls.append)
+
+    result = CliRunner().invoke(app, [*write_run_files(tmp_path, scoring_path), "--no-score"])
+
+    assert result.exit_code == 0, result.output
+    assert urls == []
+
+
+def test_run_migration_failure_sends_crash_and_exits_1_without_leaking(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    def boom(url: str) -> None:
+        raise RuntimeError(f"could not connect to {url} / secret job text")
+
+    monkeypatch.setattr("aijobradar.db.migrate.upgrade", boom)
+    jobicy = respx_mock.get(API_URL).mock(return_value=httpx.Response(200, json={"jobs": []}))
+    wwr = respx_mock.get(WWR).mock(return_value=httpx.Response(200, content=b"<rss/>"))
+    telegram = _telegram_ok(respx_mock)
+
+    result = _invoke(tmp_path, scoring_path, "--no-score", "--migrate")
+
+    assert result.exit_code == 1, result.output
+    (text,) = _texts(telegram)
+    assert "прогон не удался" in text and "Миграция БД не удалась" in text
+    assert "Миграция БД не удалась: RuntimeError" in result.stderr
+    assert not jobicy.called and not wwr.called
+    assert runs_of(cli_db, "fetch") == []
+    assert "Traceback" not in result.output
+    for leaked in (TEST_DATABASE_URL, "secret job text", TOKEN):
+        assert leaked not in result.output and leaked not in text
+
+
+def test_run_migration_failure_without_deliver_still_exits_1(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    def boom(url: str) -> None:
+        raise RuntimeError(url)
+
+    monkeypatch.setattr("aijobradar.db.migrate.upgrade", boom)
+    telegram = _telegram_ok(respx_mock)
+
+    args = [*write_run_files(tmp_path, scoring_path), "--no-score", "--migrate"]
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 1
+    assert "Миграция БД не удалась: RuntimeError" in result.stderr
+    assert not telegram.called and TEST_DATABASE_URL not in result.output
+
+
+def test_daily_unexpected_crash_send_failure_is_reported_by_class_and_keeps_the_report(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    _fail_sources(respx_mock)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(f"secret {TOKEN}")
+
+    monkeypatch.setattr("aijobradar.telegram.deliver.send_crash", boom)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1, result.output
+    assert "RuntimeError" in result.stderr
+    assert "Прогон: failed" in result.output and "Прогон: failed" in daily_env.read_text()
+    assert TOKEN not in result.output and "Traceback" not in result.output
+
+
+def test_daily_crash_reason_when_no_record_reached_the_database(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    mock_fetch(respx_mock)  # the sources answer; the database rejects every record
+
+    def reject(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("secret job text")
+
+    monkeypatch.setattr("aijobradar.pipeline.ingest", reject)
+    telegram = _telegram_ok(respx_mock)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1, result.output
+    (text,) = _texts(telegram)
+    assert "Ни одна запись не попала в БД" in text
+    assert "Все источники недоступны" not in text
+    assert "secret job text" not in text and "secret job text" not in result.output
+
+
+def test_daily_scoring_crash_is_named_in_the_footer_by_class(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 1)
+    mock_fetch(respx_mock)
+    telegram = _telegram_ok(respx_mock)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("secret job text")
+
+    monkeypatch.setattr("aijobradar.cli._score_jobs", boom)
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 0, result.output
+    footer = _texts(telegram)[-1]
+    assert "LLM: оценка прервалась (RuntimeError)" in footer
+    assert "Прогон: partial" in footer
+    assert "LLM: оценка прервалась (RuntimeError)" in result.output
+    assert "LLM: оценка прервалась (RuntimeError)" in daily_env.read_text()
+    assert "secret job text" not in footer and "secret job text" not in result.output
+
+
 def test_daily_telegram_rejects_exits_1_and_marks_run_failed(
     respx_mock: respx.MockRouter,
     cli_db: Engine,
@@ -375,10 +545,13 @@ def _seed_himalayas_run(engine: Engine, *, status: SourceStatus, hours_ago: floa
 @pytest.mark.parametrize(
     ("seeded", "expected"),
     [
-        ((SourceStatus.OK, 49.5), 56),  # last good run ~50 h ago (the clock moves on): gap + 6 h
-        ((SourceStatus.OK, 24 * 10), 96),  # a long outage: capped
-        ((SourceStatus.FAILED, 50), 30),  # a failed run is not a success: the configured window
-        (None, 30),  # no history: the configured window
+        ([(SourceStatus.OK, 29.5)], 36),  # last good run ~30 h ago (the clock moves on): gap + 6 h
+        ([(SourceStatus.OK, 24 * 10)], 40),  # a long outage: capped
+        ([(SourceStatus.FAILED, 50)], 30),  # a failed run is not a success: the configured window
+        # A degraded run is no anchor either: the window stays at the cap, measured from the
+        # earlier ok run, so a truncated walk cannot lock the source into a degraded loop.
+        ([(SourceStatus.DEGRADED, 50), (SourceStatus.OK, 74)], 40),
+        ([], 30),  # no history: the configured window
     ],
 )
 def test_run_widens_the_himalayas_window_to_the_last_success(
@@ -388,15 +561,15 @@ def test_run_widens_the_himalayas_window_to_the_last_success(
     tmp_path: Path,
     daily_env: Path,
     scoring_path: Path,
-    seeded: tuple[SourceStatus, float] | None,
+    seeded: list[tuple[SourceStatus, float]],
     expected: int,
 ) -> None:
     mock_fetch(respx_mock)
-    if seeded is not None:
-        _seed_himalayas_run(cli_db, status=seeded[0], hours_ago=seeded[1])
+    for status, hours_ago in seeded:
+        _seed_himalayas_run(cli_db, status=status, hours_ago=hours_ago)
     args = write_run_files(tmp_path, scoring_path)
     (tmp_path / "sources.yaml").write_text(
-        "himalayas: {lookback_hours: 30, max_lookback_hours: 96}\n"
+        "himalayas: {lookback_hours: 30, max_lookback_hours: 40}\n"
         "wwr: {feeds: [remote-full-stack-programming-jobs]}\n"
     )
     windows: list[int | None] = []
@@ -429,6 +602,34 @@ def test_lock_is_released_after_a_run(
     again = CliRunner().invoke(app, args)
     assert again.exit_code == 0, again.output
     assert len(runs_of(cli_db, "fetch")) == 2
+
+
+def test_failing_unlock_does_not_change_the_exit_code_or_lose_the_report(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    mock_fetch(respx_mock)
+    monkeypatch.setattr("aijobradar.db.session.make_engine", lambda url: cli_db)
+
+    def refuse_unlock(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "pg_advisory_unlock" in statement:
+            raise RuntimeError("connection is gone")
+
+    event.listen(cli_db, "before_cursor_execute", refuse_unlock)
+    try:
+        args = [*write_run_files(tmp_path, scoring_path), "--no-score"]
+        result = CliRunner().invoke(app, args)
+    finally:
+        event.remove(cli_db, "before_cursor_execute", refuse_unlock)
+        cli_db.dispose()  # closes the pooled connection that still holds the session lock
+
+    assert result.exit_code == 0, result.output
+    assert "Прогон: ok" in result.output and "Прогон: ok" in daily_env.read_text()
+    assert "Traceback" not in result.output
 
 
 def test_step_summary_gets_counters_only(
@@ -585,10 +786,32 @@ def test_labels_poll_unexpected_error_marks_run_failed_without_leaking(
     assert run.status == "failed" and run.finished_at is not None
 
 
-def test_labels_poll_is_refused_while_another_run_holds_the_lock(
+def test_labels_poll_is_refused_while_another_poll_holds_its_lock(
     respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path
 ) -> None:
     updates = respx_mock.post(GET_UPDATES)
+    with cli_db.connect() as holder:
+        holder.execute(select(func.pg_advisory_lock(_LABELS_LOCK_ID)))
+        try:
+            result = CliRunner().invoke(app, ["labels-poll"])
+        finally:
+            holder.execute(select(func.pg_advisory_unlock(_LABELS_LOCK_ID)))
+            holder.commit()
+
+    assert result.exit_code == 1
+    assert "Другой прогон уже идёт." in result.stderr
+    assert not updates.called
+    assert runs_of(cli_db, "labels") == []
+
+
+def test_labels_poll_runs_while_the_daily_run_holds_its_lock(
+    respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path
+) -> None:
+    # The 06:15 poll must not collide with the 06:00 daily run.
+    assert _LABELS_LOCK_ID != _LOCK_ID
+    respx_mock.post(GET_UPDATES).mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": []})
+    )
     with cli_db.connect() as holder:
         holder.execute(select(func.pg_advisory_lock(_LOCK_ID)))
         try:
@@ -597,7 +820,35 @@ def test_labels_poll_is_refused_while_another_run_holds_the_lock(
             holder.execute(select(func.pg_advisory_unlock(_LOCK_ID)))
             holder.commit()
 
+    assert result.exit_code == 0, result.output
+    (run,) = runs_of(cli_db, "labels")
+    assert run.status == "ok"
+
+
+DOWN_URL = "postgresql://localhost:1/x?connect_timeout=2"  # nothing listens on port 1
+
+
+def test_labels_poll_database_down_exits_1_without_traceback(
+    respx_mock: respx.MockRouter, daily_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DOWN_URL)
+    updates = respx_mock.post(GET_UPDATES)
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
     assert result.exit_code == 1
-    assert "Другой прогон уже идёт." in result.stderr
+    assert "БД недоступна." in result.stderr
+    assert "Traceback" not in result.output and "localhost" not in result.output
     assert not updates.called
-    assert runs_of(cli_db, "labels") == []
+
+
+def test_db_upgrade_database_down_exits_1_without_traceback(
+    daily_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DOWN_URL)
+
+    result = CliRunner().invoke(app, ["db", "upgrade"])
+
+    assert result.exit_code == 1
+    assert "БД недоступна." in result.stderr
+    assert "Traceback" not in result.output and "localhost" not in result.output

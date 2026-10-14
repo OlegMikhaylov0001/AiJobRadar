@@ -57,6 +57,7 @@ class FetchReport:
     outcomes: dict[DedupOutcome, int]
     rules: RulesReport | None = None
     scoring: ScoringReport | None = None
+    scoring_error: str | None = None  # class name of an exception that aborted scoring
     delivery: DeliveryReport | None = None
 
 
@@ -245,6 +246,8 @@ def format_report(report: FetchReport) -> str:
         lines.append(f"В очередь разбора отсева: {rr.sampled}")
     if report.scoring is not None:
         lines.append(format_scoring_line(report.scoring))
+    elif report.scoring_error:
+        lines.append(f"LLM: оценка прервалась ({report.scoring_error})")
     if report.delivery is not None:
         lines.append(format_delivery_line(report.delivery))
     return "\n".join(lines)

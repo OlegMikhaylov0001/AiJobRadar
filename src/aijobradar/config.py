@@ -36,7 +36,8 @@ class HimalayasConfig(BaseModel):
     enabled: bool = True
     max_pages: int = Field(500, ge=1)
     lookback_hours: int = Field(30, ge=1)
-    max_lookback_hours: int = Field(96, ge=1)
+    # 500 pages at <= 12 pages an hour is ~41 h: a longer cap could not be walked in full.
+    max_lookback_hours: int = Field(40, ge=1)
     page_delay_s: float = Field(0.5, ge=0)
     parent_categories: list[str] = Field(default_factory=lambda: ["Developer"])
 

@@ -328,7 +328,8 @@ def test_run_keeps_fetch_results_when_scoring_crashes(
     assert "Оценка прервалась: RuntimeError" in result.output
     assert "Fictional Job Text" not in result.output
     assert "Прогон: partial" in result.output  # the fetch report is still printed
-    assert "LLM:" not in result.output
+    assert "LLM: оценка прервалась (RuntimeError)" in result.output
+    assert "LLM: 0 ok" not in result.output  # no scoring counters: scoring never finished
     (run,) = runs_of(cli_db, "fetch")
     assert run.status == "partial" and run.counts["new"] == 4
     assert "Fictional Job Text" not in str(run.counts)

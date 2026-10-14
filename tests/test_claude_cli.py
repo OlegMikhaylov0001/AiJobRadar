@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from aijobradar.scoring.claude_cli import ScoreStatus, build_command, score
+from aijobradar.scoring.claude_cli import ENV_DENYLIST, ScoreStatus, build_command, score
 from aijobradar.scoring.schema import score_json_schema
 from tests.conftest import fixture_path
 
@@ -247,14 +247,35 @@ def test_retry_after_schema_violation_that_exhausts_cli_retries_keeps_total_cost
     assert result.est_cost_usd == pytest.approx(0.4)
 
 
-def test_subprocess_env_drops_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fictional")
+@pytest.mark.parametrize("name", sorted(ENV_DENYLIST))
+def test_subprocess_env_drops_credentials(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setenv(name, "fictional-secret")
     monkeypatch.setenv("HOME", "/home/fictional")
     runner, calls = _runner(_envelope("ok.json"))
     _score(runner)
     env = calls[0]["env"]
-    assert "ANTHROPIC_API_KEY" not in env
+    assert name not in env
     assert env["HOME"] == "/home/fictional" and "PATH" in env
+
+
+def test_subprocess_env_denylist_covers_the_known_secrets() -> None:
+    assert {
+        "ANTHROPIC_API_KEY",  # would switch `claude` from the subscription to API billing
+        "ANTHROPIC_AUTH_TOKEN",
+        "DATABASE_URL",
+        "PGPASSWORD",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    } <= ENV_DENYLIST
+
+
+def test_subprocess_env_keeps_the_oauth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fictional-oauth")
+    runner, calls = _runner(_envelope("ok.json"))
+    _score(runner)
+    assert calls[0]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "fictional-oauth"
 
 
 def test_subprocess_env_is_computed_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:

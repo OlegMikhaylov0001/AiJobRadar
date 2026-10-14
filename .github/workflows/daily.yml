@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv sync --locked
       - name: Claude Code (pinned)
@@ -36,18 +38,14 @@ jobs:
           umask 077
           mkdir -p private
           printf '%s\n' "$PROFILE_YAML" > private/profile.yaml
-      - name: Apply migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: uv run aijobradar db upgrade
-      - name: Fetch, rules, score, deliver
+      - name: Migrate, fetch, rules, score, deliver
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           LIMIT: ${{ inputs.limit }}
-        run: uv run aijobradar run --deliver ${LIMIT:+--limit "$LIMIT"}
+        run: uv run aijobradar run --deliver --migrate ${LIMIT:+--limit "$LIMIT"}
       - name: Keepalive (scheduled workflows stop after 60 days without repo activity)
         if: always()
         env:

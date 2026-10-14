@@ -173,3 +173,16 @@ def test_invalid_url_is_telegram_error_without_token() -> None:
         _client([]).send_message("42", "x")
     assert str(info.value) == "sendMessage: InvalidURL"
     assert TOKEN not in repr(info.value) and info.value.__cause__ is None
+
+
+def test_any_exception_from_the_http_layer_is_reduced_to_its_class_name() -> None:
+    class Stub:
+        def post(self, url: str, **kwargs: object) -> httpx.Response:
+            raise RuntimeError(f"unexpected: {url}")
+
+    client = TelegramClient(token=TOKEN, http=Stub(), sleep=lambda _: None)  # type: ignore[arg-type]
+    with pytest.raises(TelegramError) as info:
+        client.send_message("42", "x")
+    assert str(info.value) == "sendMessage: RuntimeError"
+    assert TOKEN not in repr(info.value) and info.value.__cause__ is None
+    assert info.value.__suppress_context__ or info.value.__context__ is None

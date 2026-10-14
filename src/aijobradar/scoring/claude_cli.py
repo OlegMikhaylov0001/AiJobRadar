@@ -95,9 +95,24 @@ def _structured_retries_exhausted(envelope: dict[str, Any]) -> str | None:
     return None
 
 
+# Variables `claude` has no use for. ANTHROPIC_API_KEY would also switch it from the
+# subscription to API billing. A denylist, not an allowlist: see docs/plans/stage1-followups.md.
+ENV_DENYLIST = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "DATABASE_URL",
+        "PGPASSWORD",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    }
+)
+
+
 def _subprocess_env() -> dict[str, str]:
-    # An API key in the environment would switch `claude` from the subscription to API billing.
-    return {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    return {k: v for k, v in os.environ.items() if k not in ENV_DENYLIST}
 
 
 def _count(value: Any) -> int:

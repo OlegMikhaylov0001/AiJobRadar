@@ -43,11 +43,11 @@ class TelegramClient:
 
     def _post(self, method: str, payload: dict[str, Any]) -> tuple[httpx.Response | None, str]:
         # The URL is built here, not in _call, so no frame above holds it as a local.
-        # httpx exceptions carry the request URL (and so the token): keep only the class name.
+        # Any exception may carry the request URL (and so the token): keep only the class name.
         url = f"{_API}/bot{self.token}/{method}"
         try:
             return self.http.post(url, json=payload), ""
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        except Exception as exc:
             return None, type(exc).__name__
 
     def _call(self, method: str, payload: dict[str, Any]) -> Any:

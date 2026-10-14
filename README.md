@@ -20,14 +20,15 @@ uv run aijobradar run --no-deliver
 Каталог `private/` и файл `.env` в git не попадают. Личные данные (резюме, цели,
 профиль правил, токены) хранятся только там и в секретах GitHub.
 
-Команды CLI: `db upgrade`, `run [--deliver|--no-deliver] [--limit N]`, `score`,
+Команды CLI: `db upgrade`, `run [--deliver|--no-deliver] [--migrate|--no-migrate] [--limit N]`, `score`,
 `profile import`, `rules recheck`, `labels-poll`.
 
 ## Ежедневный запуск (GitHub Actions)
 
 Workflow `daily.yml` запускается по cron в 06:00 UTC и вручную; `labels.yml` раз в три часа
 забирает оценки из Telegram (кнопки под вакансиями). Оба используют группы `concurrency`,
-а CLI берёт advisory lock в БД, так что параллельные прогоны не пересекаются.
+а CLI берёт advisory lock в БД, так что параллельные прогоны не пересекаются. У `run`/`score`
+и у `labels-poll` разные ключи блокировки: опрос меток в 06:15 не мешает ежедневному прогону.
 
 ### Секреты
 
@@ -61,7 +62,10 @@ uv run aijobradar profile import private/resume.md private/targets.md
 Импорт профиля в Neon (`profile import`) обязателен до первого `run --deliver`: без профиля в БД
 оценка останавливается с ошибкой «Нет профиля в БД».
 
-Дальше `daily.yml` сам применяет миграции (`db upgrade`) перед каждым прогоном.
+Дальше миграции применяются сами: `daily.yml` запускает `run --deliver --migrate` (миграции идут
+после проверки доступности БД; если БД недоступна или миграция упала, в Telegram уходит
+сообщение о сбое и прогон завершается с кодом 1), а `labels.yml` перед опросом выполняет
+`db upgrade`. Ошибки подключения к БД печатаются без трейсбека (хост в публичный лог не попадает).
 
 ### Ручной запуск
 

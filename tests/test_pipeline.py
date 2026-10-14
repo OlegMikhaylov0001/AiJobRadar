@@ -5,6 +5,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from aijobradar.config import AppConfig, DedupConfig
+from aijobradar.config import AppConfig, DedupConfig, HimalayasConfig, load_config
 from aijobradar.db.models import Job, Run, SourceRun
 from aijobradar.dedup import DedupOutcome
 from aijobradar.models import RawJob, SourceResult, SourceStatus
@@ -42,6 +43,7 @@ from tests.conftest import fixture_path
 from tests.rules_support import make_ctx
 
 NOW = datetime(2026, 9, 30, 6, tzinfo=UTC)
+SOURCES = Path(__file__).parent.parent / "config" / "sources.yaml"
 FINISHED = datetime(2026, 9, 30, 6, 5, tzinfo=UTC)
 
 
@@ -467,6 +469,18 @@ def test_format_report_llm_line() -> None:
     )
 
 
+def test_format_report_names_a_scoring_crash_by_class() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.PARTIAL,
+        sources=[],
+        outcomes={},
+        scoring_error="RuntimeError",
+    )
+    assert format_report(report).splitlines()[-1] == "LLM: оценка прервалась (RuntimeError)"
+    assert "оценка прервалась" not in format_report(dataclasses.replace(report, scoring_error=None))
+
+
 def test_format_report_llm_line_shows_cache_and_parked_and_zero_ok() -> None:
     report = FetchReport(
         run_id=uuid.UUID(int=1),
@@ -555,12 +569,23 @@ NOW_H = datetime(2026, 10, 14, 6, tzinfo=UTC)
     [
         (None, 30),  # first run: the configured window
         (NOW_H - timedelta(hours=24), 30),  # daily cadence: the base window covers it
-        (NOW_H - timedelta(hours=50), 56),  # a missed day: gap + 6 h margin
-        (NOW_H - timedelta(hours=50, minutes=1), 57),  # partial hours round up
-        (NOW_H - timedelta(days=10), 96),  # long outage: capped
+        (NOW_H - timedelta(hours=30), 36),  # a late cron: gap + 6 h margin
+        (NOW_H - timedelta(hours=30, minutes=1), 37),  # partial hours round up
+        (NOW_H - timedelta(hours=50), 40),  # a missed day: capped
+        (NOW_H - timedelta(days=10), 40),  # long outage: capped
     ],
 )
 def test_himalayas_window_covers_the_gap_since_last_success(
     last_ok: datetime | None, expected: int
 ) -> None:
-    assert himalayas_lookback(last_ok, NOW_H, base_hours=30, max_hours=96) == expected
+    assert himalayas_lookback(last_ok, NOW_H, base_hours=30, max_hours=40) == expected
+
+
+def test_himalayas_cap_fits_into_max_pages_in_the_shipped_config() -> None:
+    # A walk cut off at max_pages is `degraded`, which never moves the window anchor (the last
+    # `ok` run): a cap that needs more pages than max_pages would lock the source into a
+    # permanent degraded loop. The feed gives at most 12 pages an hour.
+    pages_per_hour = 12
+    shipped = load_config(SOURCES).himalayas
+    for cfg in (shipped, HimalayasConfig()):
+        assert cfg.max_lookback_hours * pages_per_hour <= cfg.max_pages

@@ -199,7 +199,8 @@ def _score_after_fetch(
         # Class name only: the message may carry job text.
         typer.echo(f"Оценка прервалась: {type(exc).__name__}", err=True)
         status = RunStatus.PARTIAL if report.status is RunStatus.OK else report.status
-        report, extra = dataclasses.replace(report, status=status), {}
+        report = dataclasses.replace(report, status=status, scoring_error=type(exc).__name__)
+        extra = {}
     try:
         with Session(engine) as session, session.begin():
             store.update_run_result(
@@ -210,7 +211,9 @@ def _score_after_fetch(
     return report
 
 
-_LOCK_ID = 4_204_2026  # one AiJobRadar run (run/score/labels-poll) per database at a time
+_LOCK_ID = 4_204_2026  # one run/score per database at a time
+# labels-poll has its own key: it only writes labels and must not collide with the daily run.
+_LABELS_LOCK_ID = 4_204_2027
 
 
 def _settings() -> "Settings":
@@ -225,11 +228,11 @@ def _settings() -> "Settings":
 
 
 @contextmanager
-def _run_lock(engine: "Engine") -> Iterator[None]:
+def _run_lock(engine: "Engine", *, lock_id: int = _LOCK_ID) -> Iterator[None]:
     from sqlalchemy import func, select
 
     with engine.connect() as conn:
-        acquired = conn.execute(select(func.pg_try_advisory_lock(_LOCK_ID))).scalar()
+        acquired = conn.execute(select(func.pg_try_advisory_lock(lock_id))).scalar()
         conn.commit()  # the session-level lock survives the commit; no transaction stays open
         if not acquired:
             typer.echo("Другой прогон уже идёт.", err=True)
@@ -237,8 +240,14 @@ def _run_lock(engine: "Engine") -> Iterator[None]:
         try:
             yield
         finally:
-            conn.execute(select(func.pg_advisory_unlock(_LOCK_ID)))
-            conn.commit()
+            try:
+                conn.execute(select(func.pg_advisory_unlock(lock_id)))
+                conn.commit()
+            except Exception:
+                # A session-level lock dies with its connection, so a failed unlock (the
+                # connection itself is gone) must not turn a finished run into a crash or
+                # swallow the report that follows.
+                pass
 
 
 def _write_step_summary(text: str) -> None:
@@ -285,7 +294,32 @@ def _send_crash(digest: _Digest, *, reason: str, report_text: str | None) -> Non
     try:
         send_crash(digest.client, chat_id=digest.chat_id, reason=reason, report_text=report_text)
     except TelegramError as exc:
-        typer.echo(f"Telegram не принял: {exc}", err=True)
+        typer.echo(f"Telegram не принял: {exc}", err=True)  # the text is "<method>: <reason>"
+    except Exception as exc:
+        # Class name only: whatever else was raised may carry the token or job text.
+        typer.echo(f"Не удалось отправить сообщение о сбое: {type(exc).__name__}", err=True)
+
+
+def _failed_reason(report: "FetchReport") -> str:
+    from aijobradar.models import SourceStatus
+
+    if all(r.status is SourceStatus.FAILED for r in report.sources):
+        return "Все источники недоступны"
+    return "Ни одна запись не попала в БД"
+
+
+def _apply_migrations(url: str, digest: _Digest | None) -> None:
+    """`run --migrate`: a failed migration is a crash like an unreachable database."""
+    from aijobradar.db.migrate import upgrade
+
+    try:
+        upgrade(url)
+    except Exception as exc:
+        # Class name only: the message (and alembic's traceback) can carry the database host.
+        typer.echo(f"Миграция БД не удалась: {type(exc).__name__}", err=True)
+        if digest is not None:
+            _send_crash(digest, reason="Миграция БД не удалась", report_text=None)
+        raise typer.Exit(1) from None
 
 
 def _record_run_status(engine: "Engine", report: "FetchReport", status: str) -> None:
@@ -367,6 +401,9 @@ def run(
     deliver: bool = typer.Option(
         False, "--deliver/--no-deliver", help="Send the digest to Telegram."
     ),
+    migrate: bool = typer.Option(
+        False, "--migrate/--no-migrate", help="Apply database migrations before the run."
+    ),
 ) -> None:
     """Fetch, deduplicate and store jobs, filter them with rules, score them with the LLM and
     optionally send the digest to Telegram."""
@@ -431,6 +468,8 @@ def run(
                 )
             typer.echo("БД недоступна.", err=True)
             raise typer.Exit(1)
+        if migrate:
+            _apply_migrations(settings.sqlalchemy_url, digest)
         with _run_lock(engine):
             # The database profile version is checked before the network, like the files above.
             profile_id = _latest_profile_id(engine) if score else None
@@ -477,7 +516,7 @@ def run(
             if digest is not None:
                 if report.status is RunStatus.FAILED:
                     _send_crash(
-                        digest, reason="Все источники недоступны", report_text=format_report(report)
+                        digest, reason=_failed_reason(report), report_text=format_report(report)
                     )
                 else:
                     report = _deliver_digest(engine, digest, report)
@@ -568,8 +607,11 @@ def labels_poll() -> None:
         typer.echo("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID.", err=True)
         raise typer.Exit(2)
     engine = make_engine(settings.sqlalchemy_url)
+    if not _database_reachable(engine):
+        typer.echo("БД недоступна.", err=True)
+        raise typer.Exit(1)
     with (
-        _run_lock(engine),
+        _run_lock(engine, lock_id=_LABELS_LOCK_ID),
         _telegram_client(token, settings.http_timeout_s) as client,
         Session(engine) as session,
     ):
@@ -598,9 +640,16 @@ def labels_poll() -> None:
 @db_app.command("upgrade")
 def db_upgrade() -> None:
     """Apply database migrations to DATABASE_URL."""
+    from sqlalchemy.exc import OperationalError
+
     from aijobradar.db.migrate import upgrade
 
-    upgrade(_settings().sqlalchemy_url)
+    try:
+        upgrade(_settings().sqlalchemy_url)
+    except OperationalError:
+        # No traceback: it would print the database host into a public log.
+        typer.echo("БД недоступна.", err=True)
+        raise typer.Exit(1) from None
     typer.echo("Миграции применены.")
 
 
