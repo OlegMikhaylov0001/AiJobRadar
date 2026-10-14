@@ -33,7 +33,7 @@ jobs:
             git -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                 commit --allow-empty -m "chore: keepalive (no repository activity for 45 days)"
-            git push
+            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
           else
             echo "Активность есть, keepalive не нужен."
           fi

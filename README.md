@@ -40,7 +40,15 @@ Workflow `daily.yml` запускается по cron в 06:00 UTC и вручн
 | `CLAUDE_CODE_OAUTH_TOKEN` | токен из `claude setup-token` |
 | `PROFILE_YAML` | содержимое `private/profile.yaml` целиком |
 
-Значение вводится интерактивно, не в командной строке (иначе оно попадёт в историю шелла):
+Перед первым запуском откройте чат с новым ботом в Telegram и нажмите `/start`: пока вы
+не написали боту первым, Telegram отвечает 403 на `sendMessage`, и прогон падает.
+
+Id чата: напишите боту любое сообщение, затем откройте в браузере
+`https://api.telegram.org/bot<токен>/getUpdates` и возьмите `message.chat.id` из ответа
+(для приватного чата это число, совпадающее с вашим user id). Токен в этом адресе — секрет:
+не вставляйте адрес в публичные места (issue, чат, скриншоты, публичные логи).
+
+Значение секрета вводится интерактивно, не в командной строке (иначе оно попадёт в историю шелла):
 
 ```bash
 gh secret set DATABASE_URL --repo <owner>/<repo>
@@ -52,12 +60,17 @@ gh secret set PROFILE_YAML --repo <owner>/<repo> < private/profile.yaml
 
 ### Первичная подготовка БД
 
-Один раз локально, с `DATABASE_URL` на ту же direct-строку Neon:
+Один раз локально, против Neon. Передавайте direct-строку Neon явно, переменной окружения на
+одну команду: тогда оставшийся в `.env` URL локальной dev-БД не подхватится, и миграции с
+профилем не уедут не в ту базу (а `daily.yml` потом не упадёт на «Нет профиля в БД»):
 
 ```bash
-uv run aijobradar db upgrade
-uv run aijobradar profile import private/resume.md private/targets.md
+DATABASE_URL='<direct-строка Neon>' uv run aijobradar db upgrade
+DATABASE_URL='<direct-строка Neon>' uv run aijobradar profile import private/resume.md private/targets.md
 ```
+
+Осторожно: так значение (а в нём пароль) попадает в историю шелла. Альтернатива — временно
+прописать direct-строку Neon в `.env`, выполнить обе команды и сразу вернуть прежнее значение.
 
 Импорт профиля в Neon (`profile import`) обязателен до первого `run --deliver`: без профиля в БД
 оценка останавливается с ошибкой «Нет профиля в БД».
@@ -133,8 +146,14 @@ GitHub отключает scheduled-workflows после 60 дней без ак
 если он старше 45 дней, пушит пустой коммит `chore: keepalive (…)` от `github-actions[bot]`
 (права `contents: write`, без секретов). 45, а не ближе к 60: до отключения остаются минимум
 две еженедельные попытки, даже если GitHub пропустит один scheduled-запуск. Цена — не больше
-одного пустого коммита примерно раз в 45 дней, и только в тихом репозитории. Если default-ветка защищена от прямых пушей, этому
-workflow нужно разрешение на push.
+одного пустого коммита примерно раз в 45 дней, и только в тихом репозитории. Пуш идёт явно в ветку запуска (`HEAD:refs/heads/$GITHUB_REF_NAME`).
+
+Условия, без которых пуш получит 403:
+
+- Settings → Actions → General → Workflow permissions должно быть «Read and write permissions»
+  (при «Read repository contents permission» права `contents: write` из workflow не хватает);
+- если default-ветка защищена от прямых пушей (branch protection / rulesets), `github-actions[bot]`
+  должен иметь право пушить в неё.
 
 ### Форки
 

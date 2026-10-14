@@ -9,6 +9,7 @@ from aijobradar.select import Pick
 from aijobradar.telegram.render import (
     MAX_MESSAGE,
     callback_data,
+    counted_keyboard,
     keyboard,
     parse_callback,
     render_crash,
@@ -148,3 +149,10 @@ def test_footer_without_line_breaks_never_splits_an_entity() -> None:
 
 def test_callback_parse_accepts_only_ascii_digits() -> None:
     assert parse_callback("l:\u0663:1") is None
+
+
+@pytest.mark.parametrize(("fit", "text"), [(True, "✅ 👍 учтено"), (False, "✅ 👎 учтено")])
+def test_counted_keyboard_is_one_inert_button(fit: bool, text: str) -> None:
+    rows = counted_keyboard(fit)["inline_keyboard"]
+    assert rows == [[{"text": text, "callback_data": "noop"}]]
+    assert parse_callback(rows[0][0]["callback_data"]) is None

@@ -124,3 +124,12 @@ class TelegramClient:
 
     def answer_callback(self, callback_id: str, text: str) -> None:
         self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+
+    def edit_reply_markup(
+        self, chat_id: str, message_id: int, reply_markup: dict[str, Any] | None
+    ) -> None:
+        """Idempotent: setting the same keyboard twice is harmless. No markup removes it."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        self._call("editMessageReplyMarkup", payload)

@@ -15,8 +15,12 @@ NOW = datetime(2026, 10, 14, 9, tzinfo=UTC)
 
 
 class FakeTelegram:
-    def __init__(self, updates: list[Any], answer_fails: bool = False) -> None:
+    def __init__(
+        self, updates: list[Any], answer_fails: bool = False, edit_fails: bool = False
+    ) -> None:
         self.updates = updates
+        self.edits: list[tuple[str, int, dict[str, Any] | None]] = []
+        self.edit_fails = edit_fails
         self.offsets: list[int] = []
         self.answers: list[str] = []
         self.answer_fails = answer_fails
@@ -35,6 +39,13 @@ class FakeTelegram:
         if self.answer_fails:
             raise TelegramError("answerCallbackQuery: HTTP 400")
         self.answers.append(callback_id)
+
+    def edit_reply_markup(
+        self, chat_id: str, message_id: int, reply_markup: dict[str, Any] | None
+    ) -> None:
+        if self.edit_fails:
+            raise TelegramError("editMessageReplyMarkup: HTTP 400")
+        self.edits.append((chat_id, message_id, reply_markup))
 
 
 def _delivery(session: Session) -> int:
@@ -60,7 +71,7 @@ def _press(update_id: int, data: str, chat: int = 42, cb: str | None = None) -> 
         "callback_query": {
             "id": cb or f"cb-{update_id}",
             "data": data,
-            "message": {"chat": {"id": chat}},
+            "message": {"message_id": 500 + update_id, "chat": {"id": chat}},
         },
     }
 
@@ -158,3 +169,60 @@ def test_a_corrupted_offset_restarts_from_zero(session: Session) -> None:
     assert tg.offsets == [0]
     assert report.labeled == 1
     assert store.get_kv(session, OFFSET_KEY) == "4"
+
+
+def _counted(fit: bool) -> dict[str, Any]:
+    text = "✅ 👍 учтено" if fit else "✅ 👎 учтено"
+    return {"inline_keyboard": [[{"text": text, "callback_data": "noop"}]]}
+
+
+def test_a_recorded_press_replaces_the_keyboard_with_a_counted_marker(session: Session) -> None:
+    d = _delivery(session)
+    tg = FakeTelegram([_press(10, f"l:{d}:1"), _press(11, f"l:{d}:0")])
+    poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert tg.edits == [("42", 510, _counted(True)), ("42", 511, _counted(False))]
+
+
+def test_ignored_and_reread_presses_are_not_edited(session: Session) -> None:
+    d = _delivery(session)
+    first = FakeTelegram([_press(7, f"l:{d}:1", cb="same")])
+    poll_labels(session, first, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    store.set_kv(session, OFFSET_KEY, "0")
+    again = FakeTelegram([_press(7, f"l:{d}:1", cb="same"), _press(8, "garbage")])
+    poll_labels(session, again, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert again.edits == []
+
+
+def test_a_press_without_a_valid_message_id_is_labeled_but_not_edited(session: Session) -> None:
+    d = _delivery(session)
+
+    def with_id(update_id: int, message_id: object) -> dict[str, Any]:
+        update = _press(update_id, f"l:{d}:1", cb=f"cb{update_id}")
+        update["callback_query"]["message"]["message_id"] = message_id
+        return update
+
+    missing = _press(3, f"l:{d}:1", cb="cb3")
+    del missing["callback_query"]["message"]["message_id"]
+    tg = FakeTelegram([with_id(1, "5"), with_id(2, True), missing])
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert report.labeled == 3
+    assert tg.edits == []
+
+
+def test_a_failed_edit_does_not_fail_the_poll(session: Session) -> None:
+    d = _delivery(session)
+    tg = FakeTelegram([_press(1, f"l:{d}:1"), _press(2, f"l:{d}:0")], edit_fails=True)
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert report.labeled == 2
+    assert store.get_kv(session, OFFSET_KEY) == "3"
+    assert tg.answers == ["cb-1", "cb-2"]
+
+
+def test_a_press_on_the_counted_marker_is_ignored(session: Session) -> None:
+    _delivery(session)
+    tg = FakeTelegram([_press(1, "noop")])
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert (report.labeled, report.ignored) == (0, 1)
+    assert session.scalars(select(Label)).all() == []
+    assert tg.edits == [] and tg.answers == []
+    assert store.get_kv(session, OFFSET_KEY) == "2"

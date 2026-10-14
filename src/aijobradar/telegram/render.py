@@ -57,6 +57,16 @@ def keyboard(delivery_id: int) -> dict[str, Any]:
     }
 
 
+# callback_data of the "counted" button: parse_callback rejects it, so a press on it is ignored.
+COUNTED_CALLBACK = "noop"
+
+
+def counted_keyboard(fit: bool) -> dict[str, Any]:
+    """Replaces the 👍/👎 keyboard once a press is recorded."""
+    text = "✅ 👍 учтено" if fit else "✅ 👎 учтено"
+    return {"inline_keyboard": [[{"text": text, "callback_data": COUNTED_CALLBACK}]]}
+
+
 def _salary(job: Job) -> str:
     if job.salary_min is None and job.salary_max is None:
         return "ставка не указана"

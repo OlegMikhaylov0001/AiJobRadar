@@ -1,5 +1,6 @@
-"""Turn 👍/👎 presses into labels. Runs every few hours, so answering a press is best effort:
-Telegram rejects answers to callback queries older than ~15 seconds.
+"""Turn 👍/👎 presses into labels. Runs every few hours, so feedback on a press is best effort:
+Telegram rejects answers to callback queries older than ~15 seconds, so the message keyboard is
+also replaced with a "counted" marker (editing a message has no such deadline).
 
 Updates come from an external API: every field is checked, and anything unexpected is ignored
 (and consumed, so it is not read again) instead of failing the poll."""
@@ -14,10 +15,18 @@ from sqlalchemy.orm import Session
 from aijobradar import store
 from aijobradar.db.models import Delivery
 from aijobradar.telegram.client import TelegramClient, TelegramError
-from aijobradar.telegram.render import parse_callback
+from aijobradar.telegram.render import counted_keyboard, parse_callback
 
 OFFSET_KEY = "telegram_update_offset"
 _MAX_CALLBACK_ID = 64  # labels.source_ref is String(64)
+
+
+@dataclass(frozen=True)
+class _Press:
+    callback_id: str
+    fit: bool
+    chat_id: str
+    message_id: int | None
 
 
 @dataclass
@@ -45,9 +54,10 @@ def _stored_offset(value: str | None) -> int:
 
 def _label_from(
     session: Session, query: dict[str, Any], chat_id: str, now: datetime
-) -> tuple[str, bool] | None:
-    """Store the label of one press; (callback id, fit) if it was new, else None."""
-    chat = _int(_dict(_dict(query.get("message")).get("chat")).get("id"))
+) -> _Press | None:
+    """Store the label of one press; the press if it was new, else None."""
+    message = _dict(query.get("message"))
+    chat = _int(_dict(message.get("chat")).get("id"))
     if chat is None or str(chat) != chat_id:
         return None  # only the owner's chat may label
     callback_id, data = query.get("id"), query.get("data")
@@ -70,7 +80,9 @@ def _label_from(
         source_ref=callback_id,
         now=now,
     )
-    return (callback_id, fit) if added else None
+    if not added:
+        return None
+    return _Press(callback_id, fit, str(chat), _int(message.get("message_id")))
 
 
 def poll_labels(
@@ -78,7 +90,7 @@ def poll_labels(
 ) -> LabelsReport:
     report = LabelsReport()
     offset = _stored_offset(store.get_kv(session, OFFSET_KEY))
-    answered: list[tuple[str, bool]] = []
+    answered: list[_Press] = []
     for update in client.get_updates(offset):
         report.updates += 1
         fields = _dict(update)
@@ -96,7 +108,12 @@ def poll_labels(
             answered.append(pressed)
     store.set_kv(session, OFFSET_KEY, str(offset))
     session.commit()  # labels and the new offset land together
-    for callback_id, fit in answered:
+    for press in answered:
         with suppress(TelegramError):  # too old to answer: the label is already stored
-            client.answer_callback(callback_id, "Записал: 👍" if fit else "Записал: 👎")
+            client.answer_callback(press.callback_id, "Записал: 👍" if press.fit else "Записал: 👎")
+        if press.message_id is not None:
+            with suppress(TelegramError):  # message gone or too old: the label is already stored
+                client.edit_reply_markup(
+                    press.chat_id, press.message_id, counted_keyboard(press.fit)
+                )
     return report

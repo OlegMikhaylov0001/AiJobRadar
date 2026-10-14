@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -308,3 +310,52 @@ def test_send_message_429_is_retried_and_unambiguous_when_exhausted() -> None:
     with pytest.raises(TelegramError) as info:
         _client(sleeps).send_message("42", "x")
     assert route.call_count == 3 and info.value.ambiguous is False
+
+
+@respx.mock
+def test_edit_reply_markup_request_shape() -> None:
+    route = respx.post(f"{BASE}/editMessageReplyMarkup").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+    markup = {"inline_keyboard": [[{"text": "x", "callback_data": "noop"}]]}
+    _client([]).edit_reply_markup("42", 77, markup)
+    assert json.loads(route.calls[0].request.read()) == {
+        "chat_id": "42",
+        "message_id": 77,
+        "reply_markup": markup,
+    }
+
+
+@respx.mock
+def test_edit_reply_markup_without_markup_omits_the_key() -> None:
+    route = respx.post(f"{BASE}/editMessageReplyMarkup").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+    _client([]).edit_reply_markup("42", 77, None)
+    assert "reply_markup" not in json.loads(route.calls[0].request.read())
+
+
+@respx.mock
+def test_edit_reply_markup_is_retried_on_5xx() -> None:
+    route = respx.post(f"{BASE}/editMessageReplyMarkup").mock(
+        side_effect=[
+            httpx.Response(502, json={"ok": False}),
+            httpx.Response(200, json={"ok": True, "result": True}),
+        ]
+    )
+    sleeps: list[float] = []
+    _client(sleeps).edit_reply_markup("42", 77, None)
+    assert route.call_count == 2 and sleeps == [1.0]
+
+
+@respx.mock
+def test_edit_reply_markup_errors_hide_token_and_description() -> None:
+    respx.post(f"{BASE}/editMessageReplyMarkup").mock(
+        return_value=httpx.Response(
+            400, json={"ok": False, "description": "message is not modified: SECRET"}
+        )
+    )
+    with pytest.raises(TelegramError) as info:
+        _client([]).edit_reply_markup("42", 77, None)
+    assert str(info.value) == "editMessageReplyMarkup: HTTP 400"
+    assert TOKEN not in repr(info.value) and "SECRET" not in repr(info.value)
