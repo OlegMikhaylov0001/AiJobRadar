@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +17,10 @@ from aijobradar.scoring.schema import ScoreAxes, score_json_schema
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _MAX_RAW = 50_000
 _MAX_ERROR = 300
+# The CLI (>= 2.1.267) validates --json-schema itself and retries internally; these identifiers
+# mean it gave up. We must not retry again: that would pay for the same failure twice.
+_STRUCTURED_SUBTYPE = "error_max_structured_output_retries"
+_STRUCTURED_REASON = "structured_output_retry_exhausted"
 
 
 class ScoreStatus(StrEnum):
@@ -78,6 +83,19 @@ def _cli_error(envelope: dict[str, Any]) -> str:
     return f"{reason} {status}" if isinstance(status, int) else reason
 
 
+def _structured_retries_exhausted(envelope: dict[str, Any]) -> str | None:
+    if envelope.get("subtype") == _STRUCTURED_SUBTYPE:
+        return _STRUCTURED_SUBTYPE
+    if envelope.get("terminal_reason") == _STRUCTURED_REASON:
+        return _STRUCTURED_REASON
+    return None
+
+
+def _subprocess_env() -> dict[str, str]:
+    # An API key in the environment would switch `claude` from the subscription to API billing.
+    return {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+
+
 def _count(value: Any) -> int:
     # The envelope is external input: a malformed number counts as zero, never crashes the run.
     try:
@@ -125,8 +143,10 @@ def score(
                 input=user_message,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout_s,
                 cwd=cwd,
+                env=_subprocess_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -160,6 +180,11 @@ def score(
         if envelope.get("stop_reason") == "refusal":
             return ScoreResult(
                 ScoreStatus.REFUSED, None, tokens_in, tokens_out, cost, raw, "refusal"
+            )
+        exhausted = _structured_retries_exhausted(envelope)
+        if exhausted is not None:
+            return ScoreResult(
+                ScoreStatus.INVALID_OUTPUT, None, tokens_in, tokens_out, cost, raw, exhausted
             )
         if envelope.get("is_error"):
             return ScoreResult(

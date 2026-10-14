@@ -184,3 +184,11 @@ def test_prompt_version_must_be_a_plain_file_name(bad: str) -> None:
     data["prompt_version"] = bad
     with pytest.raises(ValidationError):
         ScoringConfig.model_validate(data)
+
+
+def test_prompt_version_and_model_fit_the_db_columns() -> None:
+    data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    ScoringConfig.model_validate({**data, "prompt_version": "p" * 32, "model": "m" * 64})
+    for field, too_long in (("prompt_version", "p" * 33), ("model", "m" * 65)):
+        with pytest.raises(ValidationError):
+            ScoringConfig.model_validate({**data, field: too_long})

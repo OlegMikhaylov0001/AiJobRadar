@@ -463,6 +463,36 @@ def test_format_report_llm_line_shows_cache_and_parked_and_zero_ok() -> None:
     )
 
 
+def test_format_report_llm_line_shows_first_error_before_cost() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.PARTIAL,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(
+            ok=3,
+            invalid_output=2,
+            est_cost_usd=0.6,
+            first_error="error_max_structured_output_retries",
+        ),
+    )
+    assert format_report(report).splitlines()[-1] == (
+        "LLM: 3 ok · 2 invalid_output · первая ошибка: error_max_structured_output_retries"
+        " · ≈$0.60 (оценка по API-ценам)"
+    )
+
+
+def test_format_report_llm_line_omits_first_error_without_failures() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.OK,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(ok=1, first_error="stale"),
+    )
+    assert "первая ошибка" not in format_report(report)
+
+
 def test_update_run_result_merges_counts(session: Session) -> None:
     from aijobradar import store
 

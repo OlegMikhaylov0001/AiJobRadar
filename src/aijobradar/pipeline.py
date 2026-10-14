@@ -178,6 +178,8 @@ def format_scoring_line(s: ScoringReport) -> str:
     ):
         if count:
             parts.append(f"{count} {label}")
+    if s.failed and s.first_error:
+        parts.append(f"первая ошибка: {s.first_error}")
     return "LLM: " + " · ".join(parts) + f" · ≈${s.est_cost_usd:.2f} (оценка по API-ценам)"
 
 

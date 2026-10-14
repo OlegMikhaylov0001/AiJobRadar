@@ -67,6 +67,21 @@ def _safe(scorer: Scorer, message: str) -> ScoreResult:
         return ScoreResult(ScoreStatus.ERROR, None, None, None, 0.0, None, type(exc).__name__)
 
 
+def _newest_first(jobs: list[Job]) -> list[Job]:
+    """Fresh postings first (undated ones last), so the per-run budget goes to live jobs."""
+
+    def key(job: Job) -> tuple[bool, float, float, str]:
+        posted = job.posted_at
+        return (
+            posted is None,
+            -posted.timestamp() if posted is not None else 0.0,
+            -job.first_seen_at.timestamp(),
+            str(job.id),
+        )
+
+    return sorted(jobs, key=key)
+
+
 def score_pending(
     session: Session,
     *,
@@ -81,7 +96,7 @@ def score_pending(
     ver = _Key(cfg.prompt_version, cfg.model, profile.id)
     todo: list[_Pending] = []
     by_key: dict[str, _Pending] = {}
-    for job in store.jobs_in_state(session, "pending_score"):
+    for job in _newest_first(store.jobs_in_state(session, "pending_score")):
         rendered = render_job(job, cfg.max_description_chars)
         key = input_hash(rendered)
         if (

@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 import yaml
@@ -23,12 +23,21 @@ rules_app = typer.Typer(no_args_is_help=True, help="Deterministic pre-LLM rules.
 app.add_typer(rules_app, name="rules")
 
 
-def _validation_details(exc: ValidationError) -> str:
-    """'loc: type' pairs only: pydantic messages can echo the offending (personal) value."""
-    return "; ".join(
-        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['type']}"
-        for e in exc.errors(include_input=False)
-    )
+def _validation_details(exc: ValidationError, *, own_messages: bool = False) -> str:
+    """'loc: type' pairs only: pydantic messages can echo the offending (personal) value.
+
+    `own_messages` is for public configs: a `value_error` raised by our own validator is shown
+    with its message (it names a key, e.g. a mistyped flag, never a personal value).
+    """
+
+    def detail(e: Any) -> str:
+        where = ".".join(str(p) for p in e["loc"]) or "<root>"
+        if own_messages and e["type"] == "value_error":
+            message = str(e["msg"]).removeprefix("Value error, ")
+            return f"{where}: {message}" if e["loc"] else message
+        return f"{where}: {e['type']}"
+
+    return "; ".join(detail(e) for e in exc.errors(include_input=False))
 
 
 _NO_PROFILE_IN_DB = (
@@ -47,7 +56,8 @@ def _load_scoring(scoring_path: Path) -> "tuple[ScoringConfig, str]":
         typer.echo(f"Ошибка в файле оценки {scoring_path}: файл не найден", err=True)
         raise typer.Exit(2) from None
     except ValidationError as exc:
-        typer.echo(f"Ошибка в файле оценки {scoring_path}: {_validation_details(exc)}", err=True)
+        details = _validation_details(exc, own_messages=True)
+        typer.echo(f"Ошибка в файле оценки {scoring_path}: {details}", err=True)
         raise typer.Exit(2) from None
     except yaml.YAMLError:
         typer.echo(f"Ошибка в файле оценки {scoring_path}: не YAML", err=True)

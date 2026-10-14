@@ -103,6 +103,24 @@ def test_run_with_broken_scoring_config_exits_2(tmp_path: Path) -> None:
     assert "Ошибка в файле оценки" in result.output
 
 
+def test_scoring_config_error_names_the_bad_flag(tmp_path: Path) -> None:
+    # The scoring config is public: its own validation messages are safe to show.
+    scoring = tmp_path / "scoring.yaml"
+    scoring.write_text(SCORING.read_text().replace("comp_ok_no", "comp_okk_no"))
+    result = CliRunner().invoke(app, ["score", "--scoring", str(scoring)])
+    assert result.exit_code == 2
+    assert "Ошибка в файле оценки" in result.output
+    assert "unknown penalty flag 'comp_okk_no'" in result.output
+
+
+def test_profile_error_still_hides_values(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("eligible_places: [PT]\nmin_rate_usd_per_hour: Fictional Secret Value\n")
+    result = CliRunner().invoke(app, ["run", "--profile", str(profile)])
+    assert result.exit_code == 2
+    assert "Fictional Secret Value" not in result.output
+
+
 def test_profile_import_missing_file_exits_2(tmp_path: Path) -> None:
     targets = tmp_path / "targets.md"
     targets.write_text("# T")
@@ -232,6 +250,29 @@ def test_score_command_scores_pending_jobs(cli_db: Engine, monkeypatch: pytest.M
     assert "Fictional resume" not in result.output
 
 
+def test_real_make_scorer_runs_claude_in_a_scratch_directory(
+    cli_db: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aijobradar.scoring import claude_cli
+
+    _seed(cli_db, jobs=1)
+    seen: list[dict[str, Any]] = []
+
+    def fake_score(**kwargs: Any) -> ScoreResult:
+        seen.append({**kwargs, "cwd_is_dir": kwargs["cwd"].is_dir()})
+        return _ok()
+
+    monkeypatch.setattr(claude_cli, "score", fake_score)
+    result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
+    assert result.exit_code == 0, result.output
+    (call,) = seen
+    cwd = call["cwd"]
+    assert call["cwd_is_dir"] and not cwd.exists()  # temporary: gone after the run
+    assert cwd.resolve() not in (ROOT.resolve(), Path.cwd().resolve())
+    assert ROOT.resolve() not in cwd.resolve().parents
+    assert call["model"] == "claude-opus-5-5" and "Fictional resume" in call["user_message"]
+
+
 def test_score_command_without_profile_exits_2(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -251,7 +292,7 @@ def test_score_command_with_failures_is_partial(
     monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_invalid()))
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 0, result.output
-    assert "LLM: 0 ok · 1 invalid_output · ≈$0.05" in result.output
+    assert "LLM: 0 ok · 1 invalid_output · первая ошибка: skills_match: x · ≈$0.05" in result.output
     (run,) = _runs(cli_db, "score")
     assert run.status == "partial" and run.counts["llm_invalid_output"] == 1
     assert _states(cli_db) == ["pending_score"]

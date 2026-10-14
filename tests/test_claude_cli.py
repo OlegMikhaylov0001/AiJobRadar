@@ -1,6 +1,7 @@
 import json
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -204,3 +205,79 @@ def test_api_error_reports_reason_and_status_not_text() -> None:
     runner, _ = _runner(json.dumps(envelope))
     result = _score(runner)
     assert (result.status, result.error) == (ScoreStatus.ERROR, "api_error 400")
+
+
+def test_cli_structured_retries_exhausted_is_invalid_output_without_our_retry() -> None:
+    exhausted = _envelope("structured_retries_exhausted.json")
+    runner, calls = _runner(exhausted, exhausted)
+    result = _score(runner)
+    assert len(calls) == 1  # the CLI already retried: a second call would pay twice
+    assert result.status is ScoreStatus.INVALID_OUTPUT and result.axes is None
+    assert result.error == "error_max_structured_output_retries"
+    assert result.est_cost_usd == pytest.approx(0.3)
+    assert (result.input_tokens, result.output_tokens) == (15300, 1200)
+    assert "job text" not in (result.error or "")
+
+
+def test_structured_retries_exhausted_detected_by_terminal_reason_alone() -> None:
+    envelope = json.loads(_envelope("structured_retries_exhausted.json"))
+    envelope["subtype"] = "success"
+    runner, calls = _runner(json.dumps(envelope))
+    result = _score(runner)
+    assert (result.status, len(calls)) == (ScoreStatus.INVALID_OUTPUT, 1)
+    assert result.error == "structured_output_retry_exhausted"
+
+
+def test_structured_retries_exhausted_by_subtype_alone() -> None:
+    envelope = json.loads(_envelope("structured_retries_exhausted.json"))
+    del envelope["terminal_reason"]
+    runner, _ = _runner(json.dumps(envelope))
+    assert _score(runner).error == "error_max_structured_output_retries"
+
+
+def test_retry_after_schema_violation_that_exhausts_cli_retries_keeps_total_cost() -> None:
+    runner, calls = _runner(
+        _envelope("schema_violation.json"), _envelope("structured_retries_exhausted.json")
+    )
+    result = _score(runner)
+    assert len(calls) == 2 and result.status is ScoreStatus.INVALID_OUTPUT
+    assert result.est_cost_usd == pytest.approx(0.4)
+
+
+def test_subprocess_env_drops_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fictional")
+    monkeypatch.setenv("HOME", "/home/fictional")
+    runner, calls = _runner(_envelope("ok.json"))
+    _score(runner)
+    env = calls[0]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["HOME"] == "/home/fictional" and "PATH" in env
+
+
+def test_subprocess_env_is_computed_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AIJOBRADAR_TEST_MARK", "first")
+    runner, calls = _runner(_envelope("ok.json"), _envelope("ok.json"))
+    _score(runner)
+    monkeypatch.setenv("AIJOBRADAR_TEST_MARK", "second")
+    _score(runner)
+    assert [c["env"]["AIJOBRADAR_TEST_MARK"] for c in calls] == ["first", "second"]
+
+
+def test_cwd_is_passed_to_the_subprocess(tmp_path: Path) -> None:
+    runner, calls = _runner(_envelope("ok.json"))
+    score(
+        user_message="<job>x</job>",
+        system_prompt="SP",
+        model="m",
+        timeout_s=120,
+        runner=runner,
+        cwd=tmp_path,
+    )
+    assert calls[0]["cwd"] == tmp_path
+
+
+def test_subprocess_text_is_decoded_as_utf8() -> None:
+    runner, calls = _runner(_envelope("ok.json"))
+    _score(runner)
+    assert calls[0]["text"] is True and calls[0]["encoding"] == "utf-8"

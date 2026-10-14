@@ -1,3 +1,4 @@
+import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,9 +13,11 @@ from aijobradar.config import load_scoring_config
 from aijobradar.db.models import Job, LlmScore
 from aijobradar.models import RawJob
 from aijobradar.normalize import normalize
+from aijobradar.scoring import claude_cli
 from aijobradar.scoring.claude_cli import ScoreResult, ScoreStatus
 from aijobradar.scoring.engine import score_pending
 from aijobradar.scoring.schema import ScoreAxes
+from tests.conftest import fixture_path
 
 NOW = datetime(2026, 10, 9, 12, tzinfo=UTC)
 CFG = load_scoring_config(Path(__file__).parent.parent / "config" / "scoring.yaml")
@@ -98,6 +101,7 @@ def test_cached_score_is_reused_without_a_call(session: Session) -> None:
     scorer = _scorer(_ok())
     report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
     assert (report.cached, report.ok, len(scorer.calls)) == (1, 0, 0)
+    assert session.scalars(select(Job)).one().state == "scored"
 
 
 def test_failure_keeps_pending_then_parks_after_max_attempts(session: Session) -> None:
@@ -164,16 +168,36 @@ def test_raising_scorer_becomes_an_error_row_and_keeps_the_wave(session: Session
     assert states == ["pending_score", "scored", "scored"]
 
 
-def test_pending_jobs_are_processed_oldest_first(session: Session) -> None:
-    run_id, profile, jobs = _setup(session, 4)
-    for job, age in zip(jobs, (2, 0, 3, 1), strict=True):  # not insertion order
-        job.first_seen_at = NOW - timedelta(hours=age)
+def test_pending_jobs_are_processed_newest_posted_first(session: Session) -> None:
+    run_id, profile, jobs = _setup(session, 5)
+    # (posted_at age in days or None, first_seen age in hours); neither insertion order
+    # nor first_seen_at-ascending order gives the expected result.
+    ages: list[tuple[int | None, int]] = [(3, 5), (1, 1), (None, 0), (2, 9), (None, 3)]
+    for job, (posted, seen) in zip(jobs, ages, strict=True):
+        job.posted_at = NOW - timedelta(days=posted) if posted is not None else None
+        job.first_seen_at = NOW - timedelta(hours=seen)
     session.commit()
     cfg = CFG.model_copy(update={"parallelism": 1})
     scorer = _scorer(_ok())
     score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
-    order = [next(f"Engineer {i}" for i in range(4) if f"Engineer {i}" in m) for m in scorer.calls]
-    assert order == ["Engineer 2", "Engineer 0", "Engineer 3", "Engineer 1"]
+    order = [next(f"Engineer {i}" for i in range(5) if f"Engineer {i}" in m) for m in scorer.calls]
+    # dated jobs by posted_at desc, then undated ones by first_seen_at desc
+    assert order == ["Engineer 1", "Engineer 3", "Engineer 0", "Engineer 2", "Engineer 4"]
+
+
+def test_budget_goes_to_the_newest_postings(session: Session) -> None:
+    run_id, profile, jobs = _setup(session, 3)
+    for job, days in zip(jobs, (2, 0, 1), strict=True):
+        job.posted_at = NOW - timedelta(days=days)
+    session.commit()
+    scorer = _scorer(_ok())
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW, limit=2)
+    states = {j.title_raw: j.state for j in session.scalars(select(Job))}
+    assert states == {
+        "Engineer 0": "pending_score",
+        "Engineer 1": "scored",
+        "Engineer 2": "scored",
+    }
 
 
 def test_db_error_on_one_job_does_not_break_the_next(
@@ -260,3 +284,47 @@ def test_runtime_errors_never_park_a_job(session: Session) -> None:
         )
         assert (report.error, report.parked) == (1, 0)
     assert session.scalars(select(Job)).one().state == "pending_score"
+
+
+def test_refusals_count_toward_max_attempts(session: Session) -> None:
+    run_id, profile, _ = _setup(session, 1)
+    refused = ScoreResult(ScoreStatus.REFUSED, None, 100, 5, 0.01, "{}", "refusal")
+    for _ in range(CFG.max_attempts):
+        report = score_pending(
+            session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(refused), now=NOW
+        )
+        assert (report.refused, report.parked) == (1, 0)
+    assert session.scalars(select(Job)).one().state == "pending_score"
+    scorer = _scorer(refused)
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
+    assert (report.parked, report.refused, len(scorer.calls)) == (1, 0, 0)
+    assert session.scalars(select(Job)).one().state == "score_failed"
+
+
+def test_exhausted_cli_structured_retries_park_the_job(session: Session) -> None:
+    run_id, profile, _ = _setup(session, 1)
+    exhausted = fixture_path("claude", "structured_retries_exhausted.json").read_text()
+    runner_calls: list[list[str]] = []
+
+    def runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        runner_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=exhausted, stderr="")
+
+    def scorer(message: str) -> ScoreResult:
+        return claude_cli.score(
+            user_message=message, system_prompt="SP", model="m", timeout_s=1, runner=runner
+        )
+
+    for _ in range(CFG.max_attempts):
+        report = score_pending(
+            session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW
+        )
+        assert (report.invalid_output, report.error, report.parked) == (1, 0, 0)
+        assert report.first_error == "error_max_structured_output_retries"
+    assert len(runner_calls) == CFG.max_attempts  # one paid call per run, never two
+    assert session.scalars(select(Job)).one().state == "pending_score"
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
+    assert (report.parked, report.invalid_output) == (1, 0)
+    assert len(runner_calls) == CFG.max_attempts
+    assert session.scalars(select(Job)).one().state == "score_failed"
+    assert {r.status for r in session.scalars(select(LlmScore))} == {"invalid_output"}
