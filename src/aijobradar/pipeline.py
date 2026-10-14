@@ -21,6 +21,7 @@ from aijobradar.rules.context import RuleContext
 from aijobradar.rules.engine import RulesReport, apply_rules
 from aijobradar.scoring.engine import ScoringReport
 from aijobradar.sources.base import Adapter, run_adapter
+from aijobradar.telegram.deliver import DeliveryReport
 
 _STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: "⚠️ "}
 
@@ -39,6 +40,7 @@ class FetchReport:
     outcomes: dict[DedupOutcome, int]
     rules: RulesReport | None = None
     scoring: ScoringReport | None = None
+    delivery: DeliveryReport | None = None
 
 
 def run_status(results: Sequence[SourceResult]) -> RunStatus:
@@ -185,6 +187,11 @@ def format_scoring_line(s: ScoringReport) -> str:
     return "LLM: " + " · ".join(parts) + f" · ≈${s.est_cost_usd:.2f} (оценка по API-ценам)"
 
 
+def format_delivery_line(d: DeliveryReport) -> str:
+    line = f"Выдача: {d.top} выше порога" if d.top else "Выдача: подходящих нет"
+    return line + (f" + {d.explore} 🎲" if d.explore else "")
+
+
 def format_report(report: FetchReport) -> str:
     lines = [f"Прогон: {report.status.value} ({report.run_id})"]
     for r in report.sources:
@@ -221,4 +228,6 @@ def format_report(report: FetchReport) -> str:
         lines.append(f"В очередь разбора отсева: {rr.sampled}")
     if report.scoring is not None:
         lines.append(format_scoring_line(report.scoring))
+    if report.delivery is not None:
+        lines.append(format_delivery_line(report.delivery))
     return "\n".join(lines)

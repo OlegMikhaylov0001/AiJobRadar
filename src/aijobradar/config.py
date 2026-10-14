@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     database_url: str
     user_agent: str = "AiJobRadar/0.1 (personal job monitor)"
     http_timeout_s: float = 30.0
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
     @property
     def sqlalchemy_url(self) -> str:

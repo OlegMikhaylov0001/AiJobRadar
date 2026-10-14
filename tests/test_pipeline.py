@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import random
 import uuid
@@ -22,6 +23,7 @@ from aijobradar.pipeline import (
     FetchReport,
     RunStatus,
     apply_scoring_result,
+    format_delivery_line,
     format_report,
     run_fetch,
     run_status,
@@ -34,6 +36,7 @@ from aijobradar.sources.base import Adapter, Fetched
 from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
 from aijobradar.sources.jobicy import API_URL, JobicyAdapter
 from aijobradar.sources.wwr import FEED_URL, WwrAdapter
+from aijobradar.telegram.deliver import DeliveryReport
 from tests.conftest import fixture_path
 from tests.rules_support import make_ctx
 
@@ -503,3 +506,29 @@ def test_update_run_result_merges_counts(session: Session) -> None:
     refreshed = session.get(Run, run.id)
     assert refreshed is not None and refreshed.status == "partial"
     assert refreshed.counts == {"new": 1, "llm_ok": 2}
+
+
+@pytest.mark.parametrize(
+    ("report", "line"),
+    [
+        (DeliveryReport(top=3, explore=2), "Выдача: 3 выше порога + 2 🎲"),
+        (DeliveryReport(top=0, explore=2), "Выдача: подходящих нет + 2 🎲"),
+        (DeliveryReport(), "Выдача: подходящих нет"),
+    ],
+)
+def test_delivery_line(report: DeliveryReport, line: str) -> None:
+    assert format_delivery_line(report) == line
+
+
+def test_format_report_ends_with_the_delivery_line_only_when_delivered() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.OK,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(ok=1, est_cost_usd=0.1),
+    )
+    assert "Выдача" not in format_report(report)
+    delivered = dataclasses.replace(report, delivery=DeliveryReport(top=1))
+    assert format_report(delivered).splitlines()[-2].startswith("LLM:")
+    assert format_report(delivered).splitlines()[-1] == "Выдача: 1 выше порога"
