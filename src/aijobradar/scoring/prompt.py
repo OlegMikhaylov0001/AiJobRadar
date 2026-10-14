@@ -1,18 +1,18 @@
 """What the model sees. The rendered job is also the cache key: same text, same score."""
 
 import hashlib
-import re
 from pathlib import Path
 
 from aijobradar.db.models import Job, ProfileVersion
 
-_BLOCK_TAG = re.compile(r"</?\s*(?:job|resume|targets)\s*>", re.IGNORECASE)
+# No angle brackets survive in third-party text, so no tag variant (nested, spaced,
+# with attributes, fullwidth) can open or close our data blocks.
+_NO_BRACKETS = str.maketrans({"<": "‹", ">": "›", "＜": "‹", "＞": "›"})
 _TRUNCATED = "\n[описание обрезано]"
 
 
 def _clean(text: str) -> str:
-    # Third-party text must not be able to close our data blocks.
-    return _BLOCK_TAG.sub(" ", text)
+    return text.translate(_NO_BRACKETS)
 
 
 def _number(value: float) -> str:

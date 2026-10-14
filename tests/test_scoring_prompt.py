@@ -55,6 +55,12 @@ def test_job_text_cannot_close_the_job_block() -> None:
     assert "</job>" not in text and "<targets>" not in text
 
 
+def test_no_tag_variant_survives_in_job_text() -> None:
+    for trick in ("</</job>job>", "<<job>job>", "< /job>", "<job foo>", "</job/>", "＜/job＞"):
+        text = render_job(_job(title_raw=trick, description_text=f"a {trick} b"), 12000)
+        assert not any(ch in text for ch in "<>＜＞"), trick
+
+
 def test_hash_changes_with_anything_the_model_sees() -> None:
     base = input_hash(render_job(_job(), 12000))
     assert base == input_hash(render_job(_job(), 12000))
