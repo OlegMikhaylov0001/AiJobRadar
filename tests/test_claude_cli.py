@@ -161,3 +161,36 @@ def test_cli_not_executable_is_error() -> None:
         ScoreStatus.ERROR,
         "claude CLI failed: PermissionError",
     )
+
+
+def test_extra_key_name_from_model_is_not_stored() -> None:
+    envelope = json.loads(_envelope("ok.json"))
+    envelope["structured_output"]["SECRET job text as a key"] = 1
+    runner, _ = _runner(json.dumps(envelope), json.dumps(envelope))
+    result = _score(runner)
+    assert result.status is ScoreStatus.INVALID_OUTPUT
+    assert result.error == "<extra>: extra_forbidden"
+
+
+def test_timeout_on_retry_keeps_first_attempt_usage() -> None:
+    runner, _ = _runner(_envelope("schema_violation.json"), subprocess.TimeoutExpired(["c"], 120))
+    result = _score(runner)
+    assert result.status is ScoreStatus.ERROR and result.error == "timeout after 120s"
+    assert (result.input_tokens, result.output_tokens) == (5100, 400)
+    assert result.est_cost_usd == pytest.approx(0.1)
+
+
+def test_non_finite_numbers_count_as_zero() -> None:
+    text = _envelope("ok.json").replace('"total_cost_usd": 0.12', '"total_cost_usd": NaN')
+    text = text.replace('"output_tokens": 400', '"output_tokens": Infinity')
+    runner, _ = _runner(text)
+    result = _score(runner)
+    assert result.status is ScoreStatus.OK
+    assert (result.output_tokens, result.est_cost_usd) == (0, 0.0)
+
+
+def test_long_subtype_is_cut() -> None:
+    envelope = json.loads(_envelope("error.json"))
+    envelope["subtype"] = "x" * 500
+    runner, _ = _runner(json.dumps(envelope))
+    assert _score(runner).error == "x" * 100

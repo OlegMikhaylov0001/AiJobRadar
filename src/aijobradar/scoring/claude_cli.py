@@ -1,6 +1,7 @@
 """The only place that runs `claude -p` (spec §8). Swap this module to change the backend."""
 
 import json
+import math
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from aijobradar.scoring.schema import ScoreAxes, score_json_schema
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _MAX_RAW = 50_000
+_MAX_ERROR = 300
 
 
 class ScoreStatus(StrEnum):
@@ -57,25 +59,31 @@ def build_command(*, model: str, system_prompt: str, schema: dict[str, Any]) -> 
 
 
 def _fields(exc: ValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(p) for p in e['loc']) or '<root>'}: {e['type']}"
-        for e in exc.errors(include_input=False)
-    )
+    # Key names in the answer come from the model: only our own field names are stored.
+    def where(loc: tuple[int | str, ...]) -> str:
+        if not loc:
+            return "<root>"
+        return str(loc[0]) if loc[0] in ScoreAxes.model_fields else "<extra>"
+
+    return "; ".join(f"{where(e['loc'])}: {e['type']}" for e in exc.errors(include_input=False))[
+        :_MAX_ERROR
+    ]
 
 
 def _count(value: Any) -> int:
     # The envelope is external input: a malformed number counts as zero, never crashes the run.
     try:
         return max(int(value or 0), 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _cost(value: Any) -> float:
     try:
-        return max(float(value or 0.0), 0.0)
+        number = float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 def _tokens(usage: Any) -> tuple[int, int]:
@@ -101,7 +109,8 @@ def score(
     cost, tokens_in, tokens_out = 0.0, 0, 0
     raw: str | None = None
     invalid = ""
-    for _attempt in range(2):
+    for attempt in range(2):
+        failure: str | None = None
         try:
             done = runner(
                 cmd,
@@ -113,23 +122,15 @@ def score(
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return ScoreResult(
-                ScoreStatus.ERROR, None, None, None, cost, raw, f"timeout after {timeout_s:g}s"
-            )
+            failure = f"timeout after {timeout_s:g}s"
         except FileNotFoundError:
-            return ScoreResult(
-                ScoreStatus.ERROR, None, None, None, cost, raw, "claude CLI not found"
-            )
+            failure = "claude CLI not found"
         except OSError as exc:
-            return ScoreResult(
-                ScoreStatus.ERROR,
-                None,
-                None,
-                None,
-                cost,
-                raw,
-                f"claude CLI failed: {type(exc).__name__}",
-            )
+            failure = f"claude CLI failed: {type(exc).__name__}"
+        if failure is not None:
+            # A failed retry keeps what the first, paid attempt used.
+            used_in, used_out = (tokens_in, tokens_out) if attempt else (None, None)
+            return ScoreResult(ScoreStatus.ERROR, None, used_in, used_out, cost, raw, failure)
         raw = done.stdout[:_MAX_RAW]
         try:
             envelope = json.loads(done.stdout)
