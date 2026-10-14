@@ -393,6 +393,11 @@ def mark_pending_deliveries_unknown(session: Session) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
 
+def count_unknown_deliveries(session: Session) -> int:
+    """Every `unknown` row still waiting for the owner's check, from any run."""
+    return int(session.scalar(select(func.count()).where(Delivery.state == "unknown")) or 0)
+
+
 def add_label(
     session: Session,
     *,

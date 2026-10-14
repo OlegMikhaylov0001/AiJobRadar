@@ -25,7 +25,9 @@ from aijobradar.telegram.client import TelegramClient, TelegramError
 class DeliveryReport:
     top: int = 0
     explore: int = 0
-    unknown: int = 0  # sends that may or may not have arrived
+    unknown: int = 0  # this run's sends that may or may not have arrived (incl. leftovers)
+    # Every `unknown` row in the database, from any run: reported on each run until resolved.
+    unresolved: int = 0
     interrupted: bool = False  # the digest stopped before its footer
 
 
@@ -82,6 +84,7 @@ def deliver_digest(
         except Exception as exc:
             if _settle_failed_send(session, delivery, exc, requested=requested):
                 report.unknown += 1
+                report.unresolved += 1
             raise
         if pick.slot == "top":
             report.top += 1

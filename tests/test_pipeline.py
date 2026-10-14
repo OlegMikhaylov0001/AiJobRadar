@@ -26,6 +26,7 @@ from aijobradar.pipeline import (
     apply_scoring_result,
     format_delivery_line,
     format_report,
+    format_unresolved_line,
     himalayas_lookback,
     run_fetch,
     run_status,
@@ -583,10 +584,15 @@ def test_update_run_result_merges_counts(session: Session) -> None:
         (DeliveryReport(top=0, explore=2), "Выдача: подходящих нет + 2 🎲"),
         (DeliveryReport(), "Выдача: подходящих нет"),
         (
-            DeliveryReport(top=2, unknown=1, interrupted=True),
-            "Выдача прервана: отправлено 2 выше порога · 1 не подтверждено",
+            # The line shows every unresolved send in the database, not only this run's.
+            DeliveryReport(top=2, unknown=1, unresolved=3, interrupted=True),
+            "Выдача прервана: отправлено 2 выше порога · 3 не подтверждено (проверьте вручную)",
         ),
         (DeliveryReport(interrupted=True), "Выдача прервана: отправлено 0 выше порога"),
+        (
+            DeliveryReport(top=1, unresolved=2),
+            "Выдача: 1 выше порога · 2 не подтверждено (проверьте вручную)",
+        ),
         (
             DeliveryReport(top=5, explore=1, interrupted=True),
             "Выдача прервана: отправлено 5 выше порога + 1 🎲",
@@ -639,3 +645,9 @@ def test_himalayas_cap_fits_into_max_pages_in_the_shipped_config() -> None:
     shipped = load_config(SOURCES).himalayas
     for cfg in (shipped, HimalayasConfig()):
         assert cfg.max_lookback_hours * pages_per_hour <= cfg.max_pages
+
+
+def test_unresolved_line() -> None:
+    assert format_unresolved_line(2) == (
+        "⚠️ Не подтверждено доставок: 2 — проверьте вручную (README)"
+    )

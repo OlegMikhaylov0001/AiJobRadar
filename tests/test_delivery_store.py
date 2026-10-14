@@ -107,3 +107,14 @@ def test_delivery_state_is_constrained(session: Session) -> None:
     row.state = "lost"
     with pytest.raises(IntegrityError), session.begin_nested():
         session.flush()
+
+
+def test_unknown_deliveries_are_counted(session: Session) -> None:
+    for n, state in enumerate(["unknown", "sent", "pending", "unknown"]):
+        job, run = _job(session, n)
+        row = store.create_delivery(
+            session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
+        )
+        row.state = state
+    session.flush()
+    assert store.count_unknown_deliveries(session) == 2

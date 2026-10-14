@@ -216,13 +216,15 @@ def format_delivery_line(d: DeliveryReport) -> str:
     else:
         line = f"Выдача: {d.top} выше порога" if d.top else "Выдача: подходящих нет"
     line += f" + {d.explore} 🎲" if d.explore else ""
-    # Sends that may or may not have arrived: never repeated, to be checked by hand.
-    return line + (f" · {d.unknown} не подтверждено" if d.unknown else "")
+    # Every unresolved `unknown` send, from any run: never repeated, to be checked by hand.
+    if d.unresolved:
+        line += f" · {d.unresolved} не подтверждено (проверьте вручную)"
+    return line
 
 
-def format_leftover_line(count: int) -> str:
-    """Footer line for `pending` rows left by an earlier run (now `unknown`)."""
-    return f"{_WARNING}Выдача: {count} не подтверждено с прошлых прогонов (проверить вручную)"
+def format_unresolved_line(count: int) -> str:
+    """Footer line, repeated on every delivery until the owner resolves the rows."""
+    return f"{_WARNING}Не подтверждено доставок: {count} — проверьте вручную (README)"
 
 
 def format_report(report: FetchReport) -> str:

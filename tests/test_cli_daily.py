@@ -1138,10 +1138,14 @@ def test_daily_turns_leftover_pending_into_unconfirmed_and_reports_it(
     texts = _texts(telegram)
     assert len(texts) == 3  # header + the other job + footer
     assert not any("Fresh Engineer 0" in t for t in texts)  # never sent again
-    assert "1 не подтверждено" in texts[-1]  # the footer names it
+    assert "⚠️ Не подтверждено доставок: 1 — проверьте вручную (README)" in texts[-1]
     assert sorted(d.state for d in _deliveries(cli_db)) == ["sent", "unknown"]
     run = next(r for r in runs_of(cli_db, "fetch") if r.counts.get("delivered_top") is not None)
-    assert (run.counts["delivered_top"], run.counts["delivered_unknown"]) == (1, 1)
+    assert (
+        run.counts["delivered_top"],
+        run.counts["delivered_unknown"],
+        run.counts["unresolved_unknown"],
+    ) == (1, 1, 1)
     assert "Выдача: 1 выше порога · 1 не подтверждено" in result.output
     assert "Выдача: 1 выше порога · 1 не подтверждено" in daily_env.read_text()
     _assert_no_leaks(result.output, daily_env.read_text())
@@ -1169,3 +1173,59 @@ def test_daily_5xx_on_a_job_is_unconfirmed_and_not_retried(
     assert [d.state for d in _deliveries(cli_db)] == ["unknown"]
     (run,) = runs_of(cli_db, "fetch")
     assert run.counts["delivered_unknown"] == 1
+
+
+def _set_delivery_state(engine: Engine, title: str, state: str) -> None:
+    from aijobradar.db.models import Job
+
+    with Session(engine) as session, session.begin():
+        job = session.scalars(select(Job).where(Job.title_raw == title)).one()
+        delivery = session.scalars(select(Delivery).where(Delivery.job_id == job.id)).one()
+        delivery.state = state
+
+
+def test_daily_repeats_the_unconfirmed_warning_until_it_is_resolved(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    # An earlier run converted (or recorded) the row and died before telling anyone.
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 2)
+    _leave_pending_delivery(cli_db, "Fresh Engineer 0")
+    _set_delivery_state(cli_db, "Fresh Engineer 0", "unknown")
+    mock_fetch(respx_mock)
+    telegram = _telegram_ok(respx_mock)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+    warning = "⚠️ Не подтверждено доставок: 1 — проверьте вручную (README)"
+
+    first = _invoke(tmp_path, scoring_path)
+
+    assert first.exit_code == 0, first.output
+    assert warning in _texts(telegram)[-1]
+    assert "Выдача: 1 выше порога · 1 не подтверждено" in first.output
+    assert "1 не подтверждено" in daily_env.read_text()
+    latest = max(runs_of(cli_db, "fetch"), key=lambda r: r.started_at)
+    assert (latest.counts["delivered_unknown"], latest.counts["unresolved_unknown"]) == (0, 1)
+
+    # Nothing new to send today, and the row is still unresolved: the warning repeats.
+    daily_env.write_text("")
+    calls_before = len(telegram.calls)
+    again = _invoke(tmp_path, scoring_path, "--no-score")
+    assert again.exit_code == 0, again.output
+    assert warning in _texts(telegram)[-1] and len(telegram.calls) == calls_before + 2
+    assert "не подтверждено" in again.output and "не подтверждено" in daily_env.read_text()
+
+    # The owner checked the chat: it arrived. The warning is gone.
+    _set_delivery_state(cli_db, "Fresh Engineer 0", "sent")
+    daily_env.write_text("")
+    resolved = _invoke(tmp_path, scoring_path, "--no-score")
+    assert resolved.exit_code == 0, resolved.output
+    assert "Не подтверждено" not in _texts(telegram)[-1]
+    assert "не подтверждено" not in resolved.output
+    assert "не подтверждено" not in daily_env.read_text()
+    latest = max(runs_of(cli_db, "fetch"), key=lambda r: r.started_at)
+    assert latest.counts["unresolved_unknown"] == 0

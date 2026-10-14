@@ -365,6 +365,7 @@ def _delivery_counts(delivery: "DeliveryReport") -> dict[str, int]:
         "delivered_top": delivery.top,
         "delivered_explore": delivery.explore,
         "delivered_unknown": delivery.unknown,
+        "unresolved_unknown": delivery.unresolved,
     }
 
 
@@ -376,7 +377,7 @@ def _deliver_digest(engine: "Engine", digest: _Digest, report: "FetchReport") ->
     from sqlalchemy.orm import Session
 
     from aijobradar import store
-    from aijobradar.pipeline import RunStatus, format_leftover_line, format_report
+    from aijobradar.pipeline import RunStatus, format_report, format_unresolved_line
     from aijobradar.select import select_digest
     from aijobradar.telegram.client import TelegramError
     from aijobradar.telegram.deliver import DeliveryReport, deliver_digest
@@ -388,14 +389,16 @@ def _deliver_digest(engine: "Engine", digest: _Digest, report: "FetchReport") ->
         # A session of its own: deliver_digest commits each delivery row before its send.
         with Session(engine, expire_on_commit=False) as session:
             # Under the run lock, before this run writes rows: any `pending` left is from a run
-            # that died around a send. It becomes `unknown` and is counted, never lost quietly.
-            leftover = store.mark_pending_deliveries_unknown(session)
+            # that died around a send. It becomes `unknown`, counted as this run's finding.
+            sent.unknown = store.mark_pending_deliveries_unknown(session)
             session.commit()
-            sent.unknown = leftover
+            # All `unknown` rows, old ones included, are reported on every run until the owner
+            # resolves them: a run that dies before its report cannot swallow the notice.
+            sent.unresolved = store.count_unknown_deliveries(session)
             picks = select_digest(session, cfg=digest.cfg, now=now, rng=random.Random())
             footer = format_report(report)
-            if leftover:
-                footer += "\n" + format_leftover_line(leftover)
+            if sent.unresolved:
+                footer += "\n" + format_unresolved_line(sent.unresolved)
             delivery = deliver_digest(
                 session,
                 digest.client,

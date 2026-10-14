@@ -181,7 +181,7 @@ def test_an_ambiguous_send_is_kept_as_unknown_and_never_offered_again(
     states = {d.job_id: d.state for d in session.scalars(select(Delivery))}
     assert states == {picks[0].job.id: "sent", picks[1].job.id: "unknown"}
     assert len(tg.sent) == 2  # nothing is sent after it, and it is not sent again
-    assert (report.top, report.unknown) == (1, 1)
+    assert (report.top, report.unknown, report.unresolved) == (1, 1, 1)
     assert _selectable(session) == {picks[2].job.id}
 
 
