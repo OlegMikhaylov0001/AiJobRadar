@@ -118,7 +118,7 @@ class ScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(min_length=1)
-    prompt_version: str = Field(min_length=1)
+    prompt_version: str = Field(pattern=r"^[A-Za-z0-9._-]+$")  # a file name under prompts/
     timeout_s: float = Field(gt=0)
     parallelism: int = Field(ge=1)
     max_items_per_run: int = Field(ge=1)

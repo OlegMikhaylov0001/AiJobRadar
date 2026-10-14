@@ -176,3 +176,11 @@ def test_scoring_config_rejects_invalid(mutate: Any) -> None:
     mutate(raw)
     with pytest.raises(ValidationError):
         ScoringConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize("bad", ["", "../secrets", "a/b", "score v1"])
+def test_prompt_version_must_be_a_plain_file_name(bad: str) -> None:
+    data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    data["prompt_version"] = bad
+    with pytest.raises(ValidationError):
+        ScoringConfig.model_validate(data)

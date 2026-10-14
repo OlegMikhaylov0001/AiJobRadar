@@ -180,7 +180,9 @@ def run(
     ),
     score: bool = typer.Option(True, "--score/--no-score", help="Score jobs with the LLM."),
     scoring: Path = typer.Option(Path("config/scoring.yaml"), help="Scoring config (YAML)."),
-    limit: int | None = typer.Option(None, min=1, help="Score at most N jobs this run."),
+    limit: int | None = typer.Option(
+        None, min=1, help="At most N model calls this run (identical postings share one)."
+    ),
 ) -> None:
     """Fetch, deduplicate and store jobs, filter them with rules, then score them with the LLM."""
     import random
@@ -269,7 +271,9 @@ def run(
 @app.command()
 def score(
     scoring: Path = typer.Option(Path("config/scoring.yaml"), help="Scoring config (YAML)."),
-    limit: int | None = typer.Option(None, min=1, help="Score at most N jobs this run."),
+    limit: int | None = typer.Option(
+        None, min=1, help="At most N model calls this run (identical postings share one)."
+    ),
 ) -> None:
     """Score jobs waiting in pending_score with the LLM (no fetching)."""
     from sqlalchemy.orm import Session
