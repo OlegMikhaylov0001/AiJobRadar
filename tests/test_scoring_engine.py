@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -164,14 +164,16 @@ def test_raising_scorer_becomes_an_error_row_and_keeps_the_wave(session: Session
     assert states == ["pending_score", "scored", "scored"]
 
 
-def test_pending_jobs_are_processed_in_a_deterministic_order(session: Session) -> None:
-    run_id, profile, _ = _setup(session, 4)
+def test_pending_jobs_are_processed_oldest_first(session: Session) -> None:
+    run_id, profile, jobs = _setup(session, 4)
+    for job, age in zip(jobs, (2, 0, 3, 1), strict=True):  # not insertion order
+        job.first_seen_at = NOW - timedelta(hours=age)
+    session.commit()
     cfg = CFG.model_copy(update={"parallelism": 1})
-    first, second = _scorer(_ok()), _scorer(_ok())
-    score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=first, now=NOW, limit=2)
-    score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=second, now=NOW, limit=2)
-    scored = [m for s in (first, second) for m in s.calls]
-    assert len(set(scored)) == 4  # no job scored twice, none skipped across the two runs
+    scorer = _scorer(_ok())
+    score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    order = [next(f"Engineer {i}" for i in range(4) if f"Engineer {i}" in m) for m in scorer.calls]
+    assert order == ["Engineer 2", "Engineer 0", "Engineer 3", "Engineer 1"]
 
 
 def test_db_error_on_one_job_does_not_break_the_next(
@@ -184,7 +186,7 @@ def test_db_error_on_one_job_does_not_break_the_next(
 
     def flaky(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
-        if calls["n"] == 1:
+        if calls["n"] == 2:
             raise RuntimeError("db went away: private details")
         real(*args, **kwargs)
 
@@ -195,5 +197,55 @@ def test_db_error_on_one_job_does_not_break_the_next(
     )
 
     assert (report.ok, report.error, report.first_error) == (1, 1, "RuntimeError")
+    assert report.est_cost_usd == 0.2  # the failed write was still paid for
+    # The rollback for the second job did not undo the first, committed one.
     assert sorted(j.state for j in session.scalars(select(Job))) == ["pending_score", "scored"]
     assert [r.status for r in session.scalars(select(LlmScore))] == ["ok"]
+
+
+def _twins(session: Session) -> tuple[uuid.UUID, Any]:
+    """Two postings from different sources with identical text: one model input."""
+    run = store.start_run(session, "score", NOW)
+    profile, _ = store.add_profile_version(
+        session, resume_md="R", targets_md="T", note=None, now=NOW
+    )
+    for source in ("a", "b"):
+        raw = RawJob(
+            source=source,
+            source_job_id="1",
+            source_url=f"https://{source}/1",
+            title="Twin Engineer",
+            company="Twin Co",
+            description_html="<p>same</p>",
+        )
+        job = store.insert_job(session, normalize(raw), run.id, NOW)
+        store.set_job_state(session, job, "pending_score")
+    session.commit()
+    return run.id, profile
+
+
+def test_identical_inputs_share_one_paid_call(session: Session) -> None:
+    run_id, profile = _twins(session)
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
+    assert (len(scorer.calls), report.ok, report.cached, report.error) == (1, 1, 1, 0)
+    assert report.est_cost_usd == 0.1
+    assert {j.state for j in session.scalars(select(Job))} == {"scored"}
+    assert [r.status for r in session.scalars(select(LlmScore))] == ["ok"]
+
+
+def test_failed_shared_call_leaves_twins_pending(session: Session) -> None:
+    run_id, profile = _twins(session)
+    report = score_pending(
+        session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_fail()), now=NOW
+    )
+    assert (report.invalid_output, report.cached) == (1, 0)
+    assert {j.state for j in session.scalars(select(Job))} == {"pending_score"}
+
+
+def test_zero_cost_cap_calls_nothing(session: Session) -> None:
+    run_id, profile, _ = _setup(session, 2)
+    cfg = CFG.model_copy(update={"max_est_cost_usd_per_run": 0.0})
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    assert (len(scorer.calls), report.skipped_budget) == (0, 2)

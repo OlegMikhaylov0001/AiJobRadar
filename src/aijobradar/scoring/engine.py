@@ -3,7 +3,7 @@
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -41,6 +41,12 @@ class _Pending:
     job_id: uuid.UUID
     key: str
     message: str
+    # Jobs whose rendered text is identical: they share one call and one paid result.
+    followers: list[Job] = field(default_factory=list)
+
+    @property
+    def size(self) -> int:
+        return 1 + len(self.followers)
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,7 @@ def score_pending(
     report = ScoringReport()
     ver = _Key(cfg.prompt_version, cfg.model, profile.id)
     todo: list[_Pending] = []
+    by_key: dict[str, _Pending] = {}
     for job in store.jobs_in_state(session, "pending_score"):
         rendered = render_job(job, cfg.max_description_chars)
         key = input_hash(rendered)
@@ -101,17 +108,20 @@ def score_pending(
         ):
             store.set_job_state(session, job, "score_failed")
             report.parked += 1
+        elif key in by_key:
+            by_key[key].followers.append(job)
         else:
-            todo.append(_Pending(job, job.id, key, user_message(profile, rendered)))
+            by_key[key] = _Pending(job, job.id, key, user_message(profile, rendered))
+            todo.append(by_key[key])
         session.commit()
 
     cap = min(cfg.max_items_per_run, limit) if limit is not None else cfg.max_items_per_run
-    report.skipped_budget += max(0, len(todo) - cap)
+    report.skipped_budget += sum(p.size for p in todo[cap:])
     todo = todo[:cap]
     with ThreadPoolExecutor(max_workers=cfg.parallelism) as pool:
         for start in range(0, len(todo), cfg.parallelism):
             if report.est_cost_usd >= cfg.max_est_cost_usd_per_run:
-                report.skipped_budget += len(todo) - start
+                report.skipped_budget += sum(p.size for p in todo[start:])
                 break
             wave = todo[start : start + cfg.parallelism]
             # Workers only call the scorer; every database write stays in this thread.
@@ -147,7 +157,8 @@ def _record(
             now=now,
         )
         if result.status is ScoreStatus.OK:
-            store.set_job_state(session, pending.job, "scored")
+            for job in (pending.job, *pending.followers):
+                store.set_job_state(session, job, "scored")
         session.commit()  # a paid result must survive a later failure
     except Exception as exc:
         session.rollback()
@@ -156,6 +167,12 @@ def _record(
         return
     if result.status is ScoreStatus.OK:
         report.ok += 1
+        report.cached += len(pending.followers)
+        return
+    if result.status is ScoreStatus.INVALID_OUTPUT:
+        report.invalid_output += 1
+    elif result.status is ScoreStatus.REFUSED:
+        report.refused += 1
     else:
-        setattr(report, result.status.value, getattr(report, result.status.value) + 1)
-        report.first_error = report.first_error or result.error
+        report.error += 1
+    report.first_error = report.first_error or result.error
