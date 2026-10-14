@@ -126,6 +126,12 @@ class ScoringConfig(BaseModel):
     max_est_cost_usd_per_run: float = Field(gt=0)
     max_attempts: int = Field(ge=1)
     max_description_chars: int = Field(ge=1000)
+    # Digest selection (spec §6.5). The threshold is a starting point until eval (stage 5).
+    threshold: float = Field(60.0, ge=0, le=100)
+    top_n: int = Field(5, ge=0, le=10)
+    explore_n: int = Field(2, ge=0, le=5)
+    # Older postings (by posted_at, else first seen) are never sent.
+    max_age_days: int = Field(14, ge=1)
     weights: dict[str, float]
     penalties: dict[str, float]
     bonuses: dict[str, float]
