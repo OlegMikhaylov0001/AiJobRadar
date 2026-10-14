@@ -577,9 +577,13 @@ def labels_poll() -> None:
         session.commit()
         try:
             report = poll_labels(session, client, chat_id=chat_id, now=datetime.now(UTC))
-        except TelegramError as exc:
+        except Exception as exc:
             session.rollback()
-            typer.echo(f"Telegram не принял: {exc}", err=True)
+            if isinstance(exc, TelegramError):
+                typer.echo(f"Telegram не принял: {exc}", err=True)
+            else:
+                # Class name only: the message may carry job text.
+                typer.echo(f"Метки прервались: {type(exc).__name__}", err=True)
             store.finish_run(session, run, "failed", {}, datetime.now(UTC))
             session.commit()
             raise typer.Exit(1) from None

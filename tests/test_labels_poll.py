@@ -148,3 +148,13 @@ def test_a_failed_answer_does_not_fail_the_poll(session: Session) -> None:
     report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
     assert report.labeled == 1
     assert store.get_kv(session, OFFSET_KEY) == "2"
+
+
+def test_a_corrupted_offset_restarts_from_zero(session: Session) -> None:
+    d = _delivery(session)
+    store.set_kv(session, OFFSET_KEY, "not-a-number")
+    tg = FakeTelegram([_press(3, f"l:{d}:1")])
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert tg.offsets == [0]
+    assert report.labeled == 1
+    assert store.get_kv(session, OFFSET_KEY) == "4"

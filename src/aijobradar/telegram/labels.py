@@ -35,6 +35,14 @@ def _int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _stored_offset(value: str | None) -> int:
+    """A corrupted offset restarts from 0: re-read presses are deduplicated by callback id."""
+    try:
+        return max(0, int(value or 0))
+    except ValueError:
+        return 0
+
+
 def _label_from(
     session: Session, query: dict[str, Any], chat_id: str, now: datetime
 ) -> tuple[str, bool] | None:
@@ -69,7 +77,7 @@ def poll_labels(
     session: Session, client: TelegramClient, *, chat_id: str, now: datetime
 ) -> LabelsReport:
     report = LabelsReport()
-    offset = int(store.get_kv(session, OFFSET_KEY) or 0)
+    offset = _stored_offset(store.get_kv(session, OFFSET_KEY))
     answered: list[tuple[str, bool]] = []
     for update in client.get_updates(offset):
         report.updates += 1

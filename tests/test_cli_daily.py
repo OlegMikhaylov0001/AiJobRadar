@@ -566,3 +566,38 @@ def test_labels_poll_without_telegram_settings_exits_2_before_network(
     assert "Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID" in result.output
     assert not updates.called
     assert runs_of(cli_db, "labels") == []
+
+
+def test_labels_poll_unexpected_error_marks_run_failed_without_leaking(
+    cli_db: Engine, daily_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("secret job text")
+
+    monkeypatch.setattr("aijobradar.telegram.labels.poll_labels", boom)
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
+    assert result.exit_code == 1
+    assert "Метки прервались: RuntimeError" in result.stderr
+    assert "secret job text" not in result.output and TOKEN not in result.output
+    (run,) = runs_of(cli_db, "labels")
+    assert run.status == "failed" and run.finished_at is not None
+
+
+def test_labels_poll_is_refused_while_another_run_holds_the_lock(
+    respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path
+) -> None:
+    updates = respx_mock.post(GET_UPDATES)
+    with cli_db.connect() as holder:
+        holder.execute(select(func.pg_advisory_lock(_LOCK_ID)))
+        try:
+            result = CliRunner().invoke(app, ["labels-poll"])
+        finally:
+            holder.execute(select(func.pg_advisory_unlock(_LOCK_ID)))
+            holder.commit()
+
+    assert result.exit_code == 1
+    assert "Другой прогон уже идёт." in result.stderr
+    assert not updates.called
+    assert runs_of(cli_db, "labels") == []
