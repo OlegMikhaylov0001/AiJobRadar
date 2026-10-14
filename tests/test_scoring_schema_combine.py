@@ -1,14 +1,23 @@
+import copy
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
-from aijobradar.config import load_scoring_config
+from aijobradar.config import ScoringConfig, load_scoring_config
 from aijobradar.scoring.combine import final_score
 from aijobradar.scoring.schema import ScoreAxes, score_json_schema
 
-CFG = load_scoring_config(Path(__file__).parent.parent / "config" / "scoring.yaml")
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "scoring.yaml"
+CFG = load_scoring_config(CONFIG_PATH)
+
+
+def _raw_config() -> dict[str, Any]:
+    raw: dict[str, Any] = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    return copy.deepcopy(raw)
 
 
 def _axes(**overrides: Any) -> ScoreAxes:
@@ -38,9 +47,6 @@ def test_repo_scoring_config_loads() -> None:
 
 
 def test_schema_is_strict() -> None:
-    schema = score_json_schema()
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == set(ScoreAxes.model_fields)
     with pytest.raises(ValidationError):
         _axes(skills_match=5)
     with pytest.raises(ValidationError):
@@ -49,6 +55,32 @@ def test_schema_is_strict() -> None:
         _axes(why_fit="x" * 301)
     with pytest.raises(ValidationError):
         ScoreAxes.model_validate({**_axes().model_dump(), "extra": 1})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"skills_match": "3"},
+        {"skills_match": True},
+        {"skills_match": 3.0},
+        {"why_fit": "   "},
+    ],
+)
+def test_schema_rejects_loose_types(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        _axes(**overrides)
+
+
+def test_json_schema_carries_cli_constraints() -> None:
+    schema = score_json_schema()
+    assert schema["additionalProperties"] is False
+    props = schema["properties"]
+    assert props["skills_match"]["minimum"] == 0
+    assert props["skills_match"]["maximum"] == 4
+    assert props["geo_eligible"]["enum"] == ["yes", "no", "unclear"]
+    assert props["why_fit"]["maxLength"] == 300
+    dumped = json.dumps(schema)
+    assert "$ref" not in dumped and "$defs" not in dumped
 
 
 def test_perfect_job_scores_100() -> None:
@@ -87,3 +119,60 @@ def test_score_never_negative() -> None:
         geo_eligible="unclear",
     )
     assert final_score(worst, CFG) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"target_fit": 2}, 87.5),
+        ({"seniority_fit": 2}, 90.0),
+        ({"domain_match": 2}, 90.0),
+    ],
+)
+def test_weight_sensitivity(overrides: dict[str, Any], expected: float) -> None:
+    assert final_score(_axes(**overrides), CFG) == expected
+
+
+def test_weights_are_normalised() -> None:
+    # Weights are divided by their sum, so all-1.0 weights mean an equal-weight mean.
+    equal = CFG.model_copy(
+        update={"weights": {k: 1.0 for k in CFG.weights}},
+    )
+    assert final_score(_axes(skills_match=2), equal) == 87.5
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"employer_country_excluded": "unclear"}, 90.0),
+        ({"timezone_risk": "medium"}, 90.0),
+        ({"english_risk": "high"}, 85.0),
+        ({"preferred_language": "yes", "english_risk": "medium"}, 100.0),
+        ({"preferred_language": "yes", "english_risk": "high"}, 90.0),
+    ],
+)
+def test_penalties_and_bonuses(overrides: dict[str, Any], expected: float) -> None:
+    assert final_score(_axes(**overrides), CFG) == expected
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda raw: raw.update(timeout_s=0),
+        lambda raw: raw.update(max_description_chars=999),
+        lambda raw: raw.update(unexpected_key=1),
+        lambda raw: raw.update(
+            weights={
+                ("skill_match" if k == "skills_match" else k): v for k, v in raw["weights"].items()
+            }
+        ),
+        lambda raw: raw.update(weights={k: 0.0 for k in raw["weights"]}),
+        lambda raw: raw["penalties"].update(timezone_risk_extreme=10),
+        lambda raw: raw["bonuses"].update(nope=5),
+    ],
+)
+def test_scoring_config_rejects_invalid(mutate: Any) -> None:
+    raw = _raw_config()
+    mutate(raw)
+    with pytest.raises(ValidationError):
+        ScoringConfig.model_validate(raw)

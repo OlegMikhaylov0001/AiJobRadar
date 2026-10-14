@@ -1,8 +1,11 @@
 from pathlib import Path
+from typing import Literal, Self, get_args, get_origin
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from aijobradar.scoring.schema import ScoreAxes
 
 
 def to_sqlalchemy_url(url: str) -> str:
@@ -101,6 +104,16 @@ def load_rules_config(path: Path) -> RulesConfig:
     return RulesConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
+# Weighted 0-4 axes, and every "<categorical field>_<value>" flag the model can emit.
+_SCORING_AXES = frozenset({"skills_match", "domain_match", "seniority_fit", "target_fit"})
+_SCORING_FLAGS = frozenset(
+    f"{name}_{value}"
+    for name, field in ScoreAxes.model_fields.items()
+    if get_origin(field.annotation) is Literal
+    for value in get_args(field.annotation)
+)
+
+
 class ScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +128,22 @@ class ScoringConfig(BaseModel):
     weights: dict[str, float]
     penalties: dict[str, float]
     bonuses: dict[str, float]
+
+    @model_validator(mode="after")
+    def _check_scoring_keys(self) -> Self:
+        unknown_axes = set(self.weights) - _SCORING_AXES
+        if unknown_axes:
+            raise ValueError(f"unknown weight axis {sorted(unknown_axes)[0]!r}")
+        missing_axes = _SCORING_AXES - set(self.weights)
+        if missing_axes:
+            raise ValueError(f"missing weight axis {sorted(missing_axes)[0]!r}")
+        if sum(self.weights.values()) <= 0:
+            raise ValueError("weights must sum to a positive number")
+        for section, flags in (("penalty", self.penalties), ("bonus", self.bonuses)):
+            for flag in flags:
+                if flag not in _SCORING_FLAGS:
+                    raise ValueError(f"unknown {section} flag {flag!r}")
+        return self
 
 
 def load_scoring_config(path: Path) -> ScoringConfig:

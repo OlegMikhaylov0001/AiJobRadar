@@ -9,7 +9,7 @@ def final_score(axes: ScoreAxes, cfg: ScoringConfig) -> float:
         return 0.0
     total_weight = sum(cfg.weights.values())
     mean = sum(w * getattr(axes, name) / 4 for name, w in cfg.weights.items()) / total_weight
-    score: float = 100 * mean
+    score: float = 100 * mean  # annotated: getattr-derived mean is Any under mypy --strict
     flags = {
         f"geo_eligible_{axes.geo_eligible}",
         f"employer_country_excluded_{axes.employer_country_excluded}",
