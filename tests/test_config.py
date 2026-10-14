@@ -49,6 +49,8 @@ def test_unknown_config_keys_are_rejected(raw: dict[str, object]) -> None:
     [
         {"himalayas": {"max_pages": 0}},
         {"himalayas": {"lookback_hours": 0}},
+        {"himalayas": {"max_lookback_hours": 0}},
+        {"himalayas": {"lookback_hours": 48, "max_lookback_hours": 30}},
         {"himalayas": {"page_delay_s": -1}},
         {"jobicy": {"count": 0}},
         {"jobicy": {"industries": []}},

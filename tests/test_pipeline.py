@@ -4,7 +4,7 @@ import random
 import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -25,6 +25,7 @@ from aijobradar.pipeline import (
     apply_scoring_result,
     format_delivery_line,
     format_report,
+    himalayas_lookback,
     run_fetch,
     run_status,
     scoring_counts,
@@ -68,6 +69,18 @@ def test_run_status_is_failed_when_no_record_reached_the_database() -> None:
 def test_build_adapters_respects_enabled() -> None:
     cfg = AppConfig.model_validate({"jobicy": {"enabled": False}})
     assert [a.name for a in build_adapters(cfg)] == ["himalayas", "wwr"]
+
+
+def test_build_adapters_takes_the_himalayas_window_from_the_caller() -> None:
+    cfg = AppConfig.model_validate({"himalayas": {"lookback_hours": 30}})
+
+    def himalayas(adapters: list[Adapter]) -> HimalayasAdapter:
+        found = [a for a in adapters if isinstance(a, HimalayasAdapter)]
+        assert len(found) == 1
+        return found[0]
+
+    assert himalayas(build_adapters(cfg)).lookback_hours == 30
+    assert himalayas(build_adapters(cfg, himalayas_lookback_hours=56)).lookback_hours == 56
 
 
 def _mock_sources(jobicy_status: int = 200) -> None:
@@ -532,3 +545,22 @@ def test_format_report_ends_with_the_delivery_line_only_when_delivered() -> None
     delivered = dataclasses.replace(report, delivery=DeliveryReport(top=1))
     assert format_report(delivered).splitlines()[-2].startswith("LLM:")
     assert format_report(delivered).splitlines()[-1] == "Выдача: 1 выше порога"
+
+
+NOW_H = datetime(2026, 10, 14, 6, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("last_ok", "expected"),
+    [
+        (None, 30),  # first run: the configured window
+        (NOW_H - timedelta(hours=24), 30),  # daily cadence: the base window covers it
+        (NOW_H - timedelta(hours=50), 56),  # a missed day: gap + 6 h margin
+        (NOW_H - timedelta(hours=50, minutes=1), 57),  # partial hours round up
+        (NOW_H - timedelta(days=10), 96),  # long outage: capped
+    ],
+)
+def test_himalayas_window_covers_the_gap_since_last_success(
+    last_ok: datetime | None, expected: int
+) -> None:
+    assert himalayas_lookback(last_ok, NOW_H, base_hours=30, max_hours=96) == expected

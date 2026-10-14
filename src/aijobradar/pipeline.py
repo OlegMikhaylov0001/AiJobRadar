@@ -1,4 +1,5 @@
 import dataclasses
+import math
 import random
 import uuid
 from collections import Counter
@@ -24,6 +25,22 @@ from aijobradar.sources.base import Adapter, run_adapter
 from aijobradar.telegram.deliver import DeliveryReport
 
 _STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: "⚠️ "}
+
+
+def himalayas_lookback(
+    last_ok: datetime | None,
+    now: datetime,
+    *,
+    base_hours: int,
+    max_hours: int,
+    margin_hours: int = 6,
+) -> int:
+    """Walk back to the last successful Himalayas run (plus a margin), so a late or missed cron
+    does not silently lose jobs; never less than the configured window, never more than the cap."""
+    if last_ok is None:
+        return base_hours
+    gap = math.ceil((now - last_ok).total_seconds() / 3600) + margin_hours
+    return min(max(base_hours, gap), max_hours)
 
 
 class RunStatus(StrEnum):

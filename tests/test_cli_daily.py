@@ -9,7 +9,7 @@ fixtures are scored but never picked and the digest is exactly the seeded jobs.
 import itertools
 import json
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,9 +23,10 @@ from typer.testing import CliRunner, Result
 from aijobradar import store
 from aijobradar.cli import _LOCK_ID, app
 from aijobradar.db.models import Delivery, Label
-from aijobradar.models import RawJob
+from aijobradar.models import RawJob, SourceResult, SourceStatus
 from aijobradar.normalize import normalize
 from aijobradar.scoring.claude_cli import ScoreResult, ScoreStatus
+from aijobradar.sources import build_adapters as real_build_adapters
 from aijobradar.sources.jobicy import API_URL
 from aijobradar.sources.wwr import FEED_URL
 from tests.cli_support import (
@@ -360,6 +361,58 @@ def test_second_concurrent_run_is_refused(
     assert "Другой прогон уже идёт." in result.stderr
     assert not jobicy.called and not wwr.called
     assert runs_of(cli_db, "fetch") == []
+
+
+def _seed_himalayas_run(engine: Engine, *, status: SourceStatus, hours_ago: float) -> None:
+    started = datetime.now(UTC) - timedelta(hours=hours_ago)
+    with Session(engine) as session, session.begin():
+        run = store.start_run(session, "fetch", started)
+        store.record_source_result(
+            session, run.id, SourceResult(source="himalayas", status=status, items=[])
+        )
+
+
+@pytest.mark.parametrize(
+    ("seeded", "expected"),
+    [
+        ((SourceStatus.OK, 49.5), 56),  # last good run ~50 h ago (the clock moves on): gap + 6 h
+        ((SourceStatus.OK, 24 * 10), 96),  # a long outage: capped
+        ((SourceStatus.FAILED, 50), 30),  # a failed run is not a success: the configured window
+        (None, 30),  # no history: the configured window
+    ],
+)
+def test_run_widens_the_himalayas_window_to_the_last_success(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+    seeded: tuple[SourceStatus, float] | None,
+    expected: int,
+) -> None:
+    mock_fetch(respx_mock)
+    if seeded is not None:
+        _seed_himalayas_run(cli_db, status=seeded[0], hours_ago=seeded[1])
+    args = write_run_files(tmp_path, scoring_path)
+    (tmp_path / "sources.yaml").write_text(
+        "himalayas: {lookback_hours: 30, max_lookback_hours: 96}\n"
+        "wwr: {feeds: [remote-full-stack-programming-jobs]}\n"
+    )
+    windows: list[int | None] = []
+
+    def build_adapters(cfg: Any, *, himalayas_lookback_hours: int | None = None) -> Any:
+        windows.append(himalayas_lookback_hours)
+        # No Himalayas adapter is built, so there is no network for it to reach.
+        cfg.himalayas.enabled = False
+        return real_build_adapters(cfg, himalayas_lookback_hours=himalayas_lookback_hours)
+
+    monkeypatch.setattr("aijobradar.sources.build_adapters", build_adapters)
+
+    result = CliRunner().invoke(app, [*args, "--no-score"])
+
+    assert result.exit_code == 0, result.output
+    assert windows == [expected]
 
 
 def test_lock_is_released_after_a_run(

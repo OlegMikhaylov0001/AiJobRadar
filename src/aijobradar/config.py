@@ -36,8 +36,15 @@ class HimalayasConfig(BaseModel):
     enabled: bool = True
     max_pages: int = Field(500, ge=1)
     lookback_hours: int = Field(30, ge=1)
+    max_lookback_hours: int = Field(96, ge=1)
     page_delay_s: float = Field(0.5, ge=0)
     parent_categories: list[str] = Field(default_factory=lambda: ["Developer"])
+
+    @model_validator(mode="after")
+    def _check_lookback_cap(self) -> Self:
+        if self.max_lookback_hours < self.lookback_hours:
+            raise ValueError("max_lookback_hours must be >= lookback_hours")
+        return self
 
 
 class JobicyConfig(BaseModel):

@@ -6,6 +6,7 @@ himalayas:
   # Daily run + 6h margin for a late cron; data is cached for 24h, so one sync a day.
   max_pages: 500
   lookback_hours: 30
+  max_lookback_hours: 96  # cap after an outage (gap since the last ok run + 6 h)
   page_delay_s: 0.5
   parent_categories: [Developer]
 jobicy:

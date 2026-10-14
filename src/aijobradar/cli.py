@@ -374,9 +374,10 @@ def run(
 
     from sqlalchemy.orm import Session
 
+    from aijobradar import store
     from aijobradar.config import load_config
     from aijobradar.db.session import make_engine
-    from aijobradar.pipeline import RunStatus, format_report, run_fetch
+    from aijobradar.pipeline import RunStatus, format_report, himalayas_lookback, run_fetch
     from aijobradar.profile import ProfileMissing, load_profile
     from aijobradar.rules.context import build_rule_context
     from aijobradar.sources import build_adapters
@@ -433,6 +434,18 @@ def run(
         with _run_lock(engine):
             # The database profile version is checked before the network, like the files above.
             profile_id = _latest_profile_id(engine) if score else None
+            # Himalayas walks back to its last successful run, so a late or missed cron loses
+            # nothing; computed before any network call.
+            lookback: int | None = None
+            if cfg.himalayas.enabled:
+                with Session(engine) as session:
+                    last_ok = store.last_source_success(session, "himalayas")
+                lookback = himalayas_lookback(
+                    last_ok,
+                    now,
+                    base_hours=cfg.himalayas.lookback_hours,
+                    max_hours=cfg.himalayas.max_lookback_hours,
+                )
             with (
                 make_client(settings.user_agent, settings.http_timeout_s) as client,
                 Session(engine) as session,
@@ -443,7 +456,7 @@ def run(
             ):
                 report = run_fetch(
                     session,
-                    build_adapters(cfg),
+                    build_adapters(cfg, himalayas_lookback_hours=lookback),
                     client,
                     now=now,
                     dedup_cfg=cfg.dedup,
