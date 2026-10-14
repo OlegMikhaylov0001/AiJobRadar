@@ -60,3 +60,20 @@ def test_run_with_missing_rules_file_exits_2(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "Ошибка в файле правил" in result.output
     assert "файл не найден" in result.output
+
+
+def test_profile_import_missing_file_exits_2(tmp_path: Path) -> None:
+    targets = tmp_path / "targets.md"
+    targets.write_text("# T")
+    result = CliRunner().invoke(app, ["profile", "import", str(tmp_path / "nope.md"), str(targets)])
+    assert result.exit_code == 2
+    assert "Нет файла" in result.output
+
+
+def test_profile_import_empty_file_exits_2(tmp_path: Path) -> None:
+    resume, targets = tmp_path / "resume.md", tmp_path / "targets.md"
+    resume.write_text("   \n")
+    targets.write_text("# T")
+    result = CliRunner().invoke(app, ["profile", "import", str(resume), str(targets)])
+    assert result.exit_code == 2
+    assert "пуст" in result.output

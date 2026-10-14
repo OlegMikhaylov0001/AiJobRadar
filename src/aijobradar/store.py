@@ -7,7 +7,15 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from aijobradar.db.models import Job, JobSource, ReviewItem, RuleDecision, Run, SourceRun
+from aijobradar.db.models import (
+    Job,
+    JobSource,
+    ProfileVersion,
+    ReviewItem,
+    RuleDecision,
+    Run,
+    SourceRun,
+)
 from aijobradar.dedup import Candidate
 from aijobradar.models import RawJob, SourceResult
 from aijobradar.normalize import NormalizedJob
@@ -206,3 +214,22 @@ def add_review_item(
         .returning(ReviewItem.id)
     ).first()
     return inserted is not None
+
+
+def latest_profile_version(session: Session) -> ProfileVersion | None:
+    return session.scalars(
+        select(ProfileVersion).order_by(ProfileVersion.id.desc()).limit(1)
+    ).first()
+
+
+def add_profile_version(
+    session: Session, *, resume_md: str, targets_md: str, note: str | None, now: datetime
+) -> tuple[ProfileVersion, bool]:
+    """A new version only when the text changed: scores are cached per profile version."""
+    latest = latest_profile_version(session)
+    if latest is not None and (latest.resume_md, latest.targets_md) == (resume_md, targets_md):
+        return latest, False
+    version = ProfileVersion(created_at=now, resume_md=resume_md, targets_md=targets_md, note=note)
+    session.add(version)
+    session.flush()
+    return version, True

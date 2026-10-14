@@ -8,6 +8,8 @@ from pydantic import ValidationError
 app = typer.Typer(no_args_is_help=True, help="AiJobRadar: personal remote-job monitor.")
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 app.add_typer(db_app, name="db")
+profile_app = typer.Typer(no_args_is_help=True, help="Candidate profile (resume and targets).")
+app.add_typer(profile_app, name="profile")
 
 
 def _validation_details(exc: ValidationError) -> str:
@@ -105,3 +107,41 @@ def db_upgrade() -> None:
 
     upgrade(Settings().sqlalchemy_url)
     typer.echo("Миграции применены.")
+
+
+def _read_profile_doc(path: Path) -> str:
+    """Contents are personal: errors name the path only."""
+    if not path.is_file():
+        typer.echo(f"Нет файла {path}.", err=True)
+        raise typer.Exit(2)
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        typer.echo(f"Файл {path} пуст.", err=True)
+        raise typer.Exit(2)
+    return text
+
+
+@profile_app.command("import")
+def profile_import(
+    resume: Path = typer.Argument(..., help="Resume facts (Markdown, kept out of git)."),
+    targets: Path = typer.Argument(..., help="Targets and constraints (Markdown, out of git)."),
+    note: str | None = typer.Option(None, help="Short note for this version."),
+) -> None:
+    """Store the resume and targets as a new profile version (only if the text changed)."""
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+    from aijobradar.config import Settings
+    from aijobradar.db.session import make_engine
+
+    resume_md, targets_md = _read_profile_doc(resume), _read_profile_doc(targets)
+    engine = make_engine(Settings().sqlalchemy_url)
+    with Session(engine) as session, session.begin():
+        version, created = store.add_profile_version(
+            session, resume_md=resume_md, targets_md=targets_md, note=note, now=datetime.now(UTC)
+        )
+        version_id = version.id
+    if created:
+        typer.echo(f"Профиль сохранён: версия {version_id}.")
+    else:
+        typer.echo(f"Профиль не изменился: версия {version_id}.")
