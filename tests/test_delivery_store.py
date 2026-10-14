@@ -80,3 +80,30 @@ def test_last_source_success_ignores_failed_runs(session: Session) -> None:
         )
     session.flush()
     assert store.last_source_success(session, "himalayas") == NOW - timedelta(hours=30)
+
+
+def test_leftover_pending_deliveries_become_unknown(session: Session) -> None:
+    states = ["pending", "sent", "unknown", "pending"]
+    rows = []
+    for n, state in enumerate(states):
+        job, run = _job(session, n)
+        row = store.create_delivery(
+            session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
+        )
+        row.state = state
+        rows.append(row)
+    session.flush()
+    assert store.mark_pending_deliveries_unknown(session) == 2
+    session.expire_all()
+    assert [r.state for r in rows] == ["unknown", "sent", "unknown", "unknown"]
+    assert store.mark_pending_deliveries_unknown(session) == 0
+
+
+def test_delivery_state_is_constrained(session: Session) -> None:
+    job, run = _job(session)
+    row = store.create_delivery(
+        session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
+    )
+    row.state = "lost"
+    with pytest.raises(IntegrityError), session.begin_nested():
+        session.flush()

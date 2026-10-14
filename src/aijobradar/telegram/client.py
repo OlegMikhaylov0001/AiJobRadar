@@ -81,7 +81,13 @@ class TelegramClient:
             if response.status_code == 200:
                 # Telegram answered 200 but the body is not the expected one: it may have acted.
                 raise TelegramError(f"{method}: HTTP 200", ambiguous=True) from None
-            # Any other status: Telegram answered and did not act (5xx and 429 included).
+            if response.status_code >= 500 and method in _NOT_IDEMPOTENT:
+                # A 5xx can come from a proxy that lost the answer to a request Telegram already
+                # acted on: repeating it could post the message twice.
+                raise TelegramError(
+                    f"{method}: HTTP {response.status_code}", ambiguous=True
+                ) from None
+            # 4xx (429 included): Telegram answered and did not act.
             retryable = response.status_code == 429 or response.status_code >= 500
             if not retryable or attempt == self.attempts:
                 raise TelegramError(f"{method}: HTTP {response.status_code}") from None

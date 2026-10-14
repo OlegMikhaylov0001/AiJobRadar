@@ -27,7 +27,7 @@ class FakeTelegram:
     def __init__(self, fail_on: int | None = None, error: Exception | None = None) -> None:
         self.sent: list[tuple[str, Any]] = []
         self.fail_on = fail_on
-        self.error = error or TelegramError("sendMessage: HTTP 500")
+        self.error = error or TelegramError("sendMessage: HTTP 400")
 
     def send_message(self, chat_id: str, text: str, reply_markup: Any = None) -> int:
         if self.fail_on is not None and len(self.sent) + 1 == self.fail_on:
@@ -215,3 +215,35 @@ def test_each_delivery_row_is_committed_as_pending_before_its_send(cli_db: Engin
     assert tg.committed == [[(1, "pending")], [(1, "sent"), (2, "pending")]]
     with Session(cli_db) as other:
         assert [d.state for d in other.scalars(select(Delivery))] == ["sent", "sent"]
+
+
+def test_a_render_failure_leaves_no_row(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, picks = _picks(session, 2)
+
+    def broken(pick: Pick, position: int) -> str:
+        raise RuntimeError("secret job text")
+
+    monkeypatch.setattr("aijobradar.telegram.render.render_job", broken)
+    tg = FakeTelegram()
+    with pytest.raises(RuntimeError):
+        _deliver(session, tg, picks, None)
+    assert session.scalars(select(Delivery)).all() == []
+    assert len(tg.sent) == 1  # the header only
+
+
+def test_a_failure_between_the_pending_commit_and_the_send_deletes_the_row(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing reached Telegram: the job must stay available, not stuck as pending.
+    _, picks = _picks(session, 2)
+
+    def broken(delivery_id: int) -> Any:
+        raise RuntimeError("keyboard")
+
+    monkeypatch.setattr("aijobradar.telegram.render.keyboard", broken)
+    report = DeliveryReport()
+    with pytest.raises(RuntimeError):
+        _deliver(session, FakeTelegram(), picks, report)
+    assert session.scalars(select(Delivery)).all() == []
+    assert report.unknown == 0
+    assert _selectable(session) == {picks[0].job.id, picks[1].job.id}

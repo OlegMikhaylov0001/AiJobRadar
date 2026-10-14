@@ -220,6 +220,11 @@ def format_delivery_line(d: DeliveryReport) -> str:
     return line + (f" · {d.unknown} не подтверждено" if d.unknown else "")
 
 
+def format_leftover_line(count: int) -> str:
+    """Footer line for `pending` rows left by an earlier run (now `unknown`)."""
+    return f"{_WARNING}Выдача: {count} не подтверждено с прошлых прогонов (проверить вручную)"
+
+
 def format_report(report: FetchReport) -> str:
     lines = [f"Прогон: {report.status.value} ({report.run_id})"]
     for r in report.sources:

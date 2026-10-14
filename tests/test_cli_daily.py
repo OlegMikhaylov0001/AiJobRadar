@@ -865,7 +865,7 @@ def test_db_upgrade_database_down_exits_1_without_traceback(
 
 
 def _telegram_script(router: respx.MockRouter, script: list[str]) -> respx.Route:
-    """One reply per sendMessage call: "ok", "400" or "timeout"; "ok" once the script ends."""
+    """One reply per sendMessage call: "ok", "400", "502" or "timeout"; then "ok"."""
     ids = itertools.count(1)
     steps = iter(script)
 
@@ -875,6 +875,8 @@ def _telegram_script(router: respx.MockRouter, script: list[str]) -> respx.Route
             raise httpx.ReadTimeout("read timed out", request=request)
         if step == "400":
             return httpx.Response(400, json={"ok": False, "description": "SECRET JOB TEXT"})
+        if step == "502":
+            return httpx.Response(502, text="Bad Gateway")
         return httpx.Response(200, json={"ok": True, "result": {"message_id": next(ids)}})
 
     return router.post(SEND).mock(side_effect=reply)
@@ -1101,3 +1103,69 @@ def test_db_upgrade_other_failure_is_named_by_class_only(
     assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
     assert "Миграция БД не удалась: RuntimeError" in result.stderr
     assert SECRET_HOST not in result.output and TEST_DATABASE_URL not in result.output
+
+
+def _leave_pending_delivery(engine: Engine, title: str) -> None:
+    """What a run killed mid-send leaves behind: a committed `pending` row."""
+    from aijobradar.db.models import Job
+
+    with Session(engine) as session, session.begin():
+        job = session.scalars(select(Job).where(Job.title_raw == title)).one()
+        run = store.start_run(session, "fetch", datetime.now(UTC) - timedelta(days=1))
+        store.create_delivery(
+            session, job_id=job.id, run_id=run.id, slot="top", position=1, now=run.started_at
+        )
+
+
+def test_daily_turns_leftover_pending_into_unconfirmed_and_reports_it(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 2)
+    _leave_pending_delivery(cli_db, "Fresh Engineer 0")
+    mock_fetch(respx_mock)
+    telegram = _telegram_ok(respx_mock)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 0, result.output
+    texts = _texts(telegram)
+    assert len(texts) == 3  # header + the other job + footer
+    assert not any("Fresh Engineer 0" in t for t in texts)  # never sent again
+    assert "1 не подтверждено" in texts[-1]  # the footer names it
+    assert sorted(d.state for d in _deliveries(cli_db)) == ["sent", "unknown"]
+    run = next(r for r in runs_of(cli_db, "fetch") if r.counts.get("delivered_top") is not None)
+    assert (run.counts["delivered_top"], run.counts["delivered_unknown"]) == (1, 1)
+    assert "Выдача: 1 выше порога · 1 не подтверждено" in result.output
+    assert "Выдача: 1 выше порога · 1 не подтверждено" in daily_env.read_text()
+    _assert_no_leaks(result.output, daily_env.read_text())
+
+
+def test_daily_5xx_on_a_job_is_unconfirmed_and_not_retried(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 2)
+    mock_fetch(respx_mock)
+    telegram = _telegram_script(respx_mock, ["ok", "502"])  # header, job 1: a proxy's 502
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1
+    assert len(telegram.calls) == 2  # Telegram may have posted it: no retry
+    assert "Telegram не принял: sendMessage: HTTP 502" in result.stderr
+    assert [d.state for d in _deliveries(cli_db)] == ["unknown"]
+    (run,) = runs_of(cli_db, "fetch")
+    assert run.counts["delivered_unknown"] == 1

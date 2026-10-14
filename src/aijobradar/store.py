@@ -383,6 +383,16 @@ def create_delivery(
     return delivery
 
 
+def mark_pending_deliveries_unknown(session: Session) -> int:
+    """Rows still `pending` were left by a run that died around a send (killed, a failed
+    commit after Telegram accepted): whether the message arrived is unknown. Call it only
+    under the run lock, before this run creates rows of its own."""
+    result = session.execute(
+        update(Delivery).where(Delivery.state == "pending").values(state="unknown")
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def add_label(
     session: Session,
     *,

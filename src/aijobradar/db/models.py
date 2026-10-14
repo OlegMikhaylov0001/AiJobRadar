@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -173,7 +174,10 @@ class LlmScore(Base):
 class Delivery(Base):
     __tablename__ = "deliveries"
     # A job is sent at most once, ever.
-    __table_args__ = (UniqueConstraint("job_id", name="uq_deliveries_job"),)
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_deliveries_job"),
+        CheckConstraint("state IN ('pending', 'sent', 'unknown')", name="ck_deliveries_state"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))

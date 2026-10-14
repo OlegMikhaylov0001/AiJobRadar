@@ -48,6 +48,7 @@ def upgrade() -> None:
         sa.Column("state", sa.String(8), nullable=False),  # pending | sent | unknown
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("job_id", name="uq_deliveries_job"),
+        sa.CheckConstraint("state IN ('pending', 'sent', 'unknown')", name="ck_deliveries_state"),
     )
     op.create_table(
         "labels",

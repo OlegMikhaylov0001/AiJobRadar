@@ -95,28 +95,46 @@ def test_get_updates_and_answer_callback() -> None:
 
 
 @respx.mock
-def test_5xx_is_retried_then_succeeds() -> None:
-    respx.post(f"{BASE}/sendMessage").mock(
+def test_5xx_is_retried_for_an_idempotent_method() -> None:
+    route = respx.post(f"{BASE}/getUpdates").mock(
         side_effect=[
             httpx.Response(500, json={"ok": False}),
-            httpx.Response(200, json={"ok": True, "result": {"message_id": 9}}),
+            httpx.Response(200, json={"ok": True, "result": []}),
         ]
     )
     sleeps: list[float] = []
-    assert _client(sleeps).send_message("42", "x") == 9
-    assert sleeps == [1.0]
+    assert _client(sleeps).get_updates(0) == []
+    assert route.call_count == 2 and sleeps == [1.0]
 
 
 @respx.mock
-def test_5xx_exhaustion_fails_after_three_attempts() -> None:
-    route = respx.post(f"{BASE}/sendMessage").mock(
+def test_5xx_exhaustion_fails_after_three_attempts_for_an_idempotent_method() -> None:
+    route = respx.post(f"{BASE}/getUpdates").mock(
         side_effect=[httpx.Response(502, json={"ok": False})] * 3
     )
     sleeps: list[float] = []
     with pytest.raises(TelegramError) as info:
-        _client(sleeps).send_message("42", "x")
+        _client(sleeps).get_updates(0)
     assert route.call_count == 3 and len(sleeps) == 2
-    assert str(info.value) == "sendMessage: HTTP 502"
+    assert str(info.value) == "getUpdates: HTTP 502"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+@respx.mock
+def test_send_message_5xx_is_ambiguous_and_not_retried(status: int) -> None:
+    # A proxy in front of Telegram can lose the answer to a POST Telegram already acted on.
+    route = respx.post(f"{BASE}/sendMessage").mock(
+        side_effect=[
+            httpx.Response(status, json={"ok": False}),
+            httpx.Response(200, json={"ok": True, "result": {"message_id": 9}}),
+        ]
+    )
+    sleeps: list[float] = []
+    with pytest.raises(TelegramError) as info:
+        _client(sleeps).send_message("42", "x")
+    assert route.call_count == 1 and sleeps == []
+    assert info.value.ambiguous is True
+    assert str(info.value) == f"sendMessage: HTTP {status}"
 
 
 @pytest.mark.parametrize(("retry_after", "expected"), [(-5, 0.0), (10_000, 60.0)])
@@ -241,9 +259,9 @@ def test_invalid_url_is_unambiguous() -> None:
     assert info.value.ambiguous is False
 
 
-@pytest.mark.parametrize("status", [400, 403, 502])
+@pytest.mark.parametrize("status", [400, 403, 404])
 @respx.mock
-def test_http_error_status_is_unambiguous(status: int) -> None:
+def test_http_4xx_status_is_unambiguous(status: int) -> None:
     respx.post(f"{BASE}/sendMessage").mock(return_value=httpx.Response(status, json={"ok": False}))
     with pytest.raises(TelegramError) as info:
         _client([]).send_message("42", "x")
@@ -279,3 +297,14 @@ def test_get_updates_still_retries_a_read_timeout() -> None:
 
 def test_telegram_error_is_unambiguous_by_default() -> None:
     assert TelegramError("sendMessage: HTTP 400").ambiguous is False
+
+
+@respx.mock
+def test_send_message_429_is_retried_and_unambiguous_when_exhausted() -> None:
+    route = respx.post(f"{BASE}/sendMessage").mock(
+        side_effect=[httpx.Response(429, json={"ok": False})] * 3
+    )
+    sleeps: list[float] = []
+    with pytest.raises(TelegramError) as info:
+        _client(sleeps).send_message("42", "x")
+    assert route.call_count == 3 and info.value.ambiguous is False

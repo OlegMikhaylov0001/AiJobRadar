@@ -4,7 +4,9 @@ Each job's delivery row is committed as `pending` before its send, so a crash at
 leaves a row that keeps the job out of later digests. After the send the row becomes `sent`;
 if Telegram certainly did not take the message it is deleted (the job is offered again next
 run); if it may have taken it, the row becomes `unknown` and the job is never sent again
-automatically: those are counted in the run report for a manual check."""
+automatically: those are counted in the run report for a manual check. A row left `pending`
+by a run that died around a send becomes `unknown` at the start of the next delivery
+(`store.mark_pending_deliveries_unknown`)."""
 
 import uuid
 from dataclasses import dataclass
@@ -27,10 +29,14 @@ class DeliveryReport:
     interrupted: bool = False  # the digest stopped before its footer
 
 
-def _settle_failed_send(session: Session, delivery: Delivery, exc: Exception) -> bool:
-    """Record a failed send; True if the message may have arrived (row kept as `unknown`)."""
-    # A non-Telegram exception cannot tell whether the request left: treat it as ambiguous.
-    ambiguous = not isinstance(exc, TelegramError) or exc.ambiguous
+def _settle_failed_send(
+    session: Session, delivery: Delivery, exc: Exception, *, requested: bool
+) -> bool:
+    """Record a failed send; True if the message may have arrived (row kept as `unknown`).
+
+    `requested`: the HTTP call had started. Before it nothing can have reached Telegram; after
+    it a non-Telegram exception cannot tell whether the request left, so it is ambiguous."""
+    ambiguous = requested and (not isinstance(exc, TelegramError) or exc.ambiguous)
     try:
         if ambiguous:
             delivery.state = "unknown"
@@ -61,15 +67,20 @@ def deliver_digest(
     top = sum(p.slot == "top" for p in picks)
     client.send_message(chat_id, render.render_header(now.date(), top, len(picks) - top))
     for position, pick in enumerate(picks, start=1):
+        text = render.render_job(pick, position)  # before the row: a failure here leaves none
         delivery = store.create_delivery(
             session, job_id=pick.job.id, run_id=run_id, slot=pick.slot, position=position, now=now
         )
         session.commit()  # before the send: from here on the job can never be picked again
-        text, markup = render.render_job(pick, position), render.keyboard(delivery.id)
+        # Everything between that commit and the answer is settled below; a row left `pending`
+        # (the process killed here, or the `sent` commit failing) becomes `unknown` next run.
+        requested = False
         try:
+            markup = render.keyboard(delivery.id)
+            requested = True
             message_id = client.send_message(chat_id, text, markup)
         except Exception as exc:
-            if _settle_failed_send(session, delivery, exc):
+            if _settle_failed_send(session, delivery, exc, requested=requested):
                 report.unknown += 1
             raise
         if pick.slot == "top":
