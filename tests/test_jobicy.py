@@ -64,7 +64,17 @@ def test_success_false_is_failed() -> None:
     with httpx.Client() as client:
         result = run_adapter(JobicyAdapter(), client)
     assert result.status is SourceStatus.FAILED
-    assert result.error is not None and "success=false" in result.error
+    assert result.error == "engineering: SourceFormatError: jobicy success=false (statusCode=400)"
+
+
+@respx.mock
+def test_success_false_does_not_echo_a_non_numeric_status_code() -> None:
+    respx.get(API_URL).mock(
+        return_value=httpx.Response(200, json={"success": False, "statusCode": "Secret text"})
+    )
+    with httpx.Client() as client:
+        result = run_adapter(JobicyAdapter(), client)
+    assert result.error == "engineering: SourceFormatError: jobicy success=false"
 
 
 @respx.mock

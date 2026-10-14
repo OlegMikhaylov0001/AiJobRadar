@@ -150,7 +150,9 @@ def test_unexpected_envelope_on_later_page_is_degraded() -> None:
     with httpx.Client() as client:
         result = run_adapter(_adapter(), client)
     assert result.status is SourceStatus.DEGRADED
-    assert result.error is not None and result.error.startswith("page 2: ValueError: unexpected")
+    assert result.error is not None and result.error.startswith(
+        "page 2: SourceFormatError: unexpected"
+    )
 
 
 @pytest.mark.parametrize("value", [None, "Developer", [1], "missing"])
@@ -215,7 +217,9 @@ def test_empty_page_before_the_end_is_degraded_not_a_natural_end(total: int) -> 
     with httpx.Client() as client:
         result = run_adapter(_adapter(), client)
     assert result.status is SourceStatus.DEGRADED
-    assert result.error == "page 2: ValueError: unexpected response: empty page before totalCount"
+    assert result.error == (
+        "page 2: SourceFormatError: unexpected response: empty page before totalCount"
+    )
 
 
 @respx.mock

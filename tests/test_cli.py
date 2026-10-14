@@ -1,31 +1,34 @@
-import json
-from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 import respx
-from sqlalchemy import Engine, select, text
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from aijobradar import store
 from aijobradar.cli import app
-from aijobradar.config import ScoringConfig, load_rules_config
-from aijobradar.db.models import Base, Job, LlmScore, Run
+from aijobradar.config import load_rules_config
+from aijobradar.db.models import Job, LlmScore
 from aijobradar.models import RawJob
 from aijobradar.normalize import normalize
-from aijobradar.scoring.claude_cli import ScoreResult, ScoreStatus
-from aijobradar.sources.jobicy import API_URL
-from aijobradar.sources.wwr import FEED_URL
-from tests.conftest import TEST_DATABASE_URL, fixture_path
-from tests.test_scoring_engine import AXES
+from aijobradar.scoring.claude_cli import ScoreResult
+from tests.cli_support import (
+    NOW,
+    ROOT,
+    SCORING,
+    FakeScorer,
+    cli_db_fixture,  # noqa: F401  (registers the `cli_db` fixture)
+    invalid_result,
+    job_states,
+    mock_fetch,
+    ok_result,
+    runs_of,
+    seed,
+    write_run_files,
+)
 
-ROOT = Path(__file__).parent.parent
-SCORING = ROOT / "config" / "scoring.yaml"
-NOW = datetime(2026, 10, 9, 12, tzinfo=UTC)
 NO_PROFILE_MESSAGE = (
     "Нет профиля в БД. Импортируйте: aijobradar profile import private/resume.md private/targets.md"
 )
@@ -84,6 +87,18 @@ def test_run_with_missing_rules_file_exits_2(tmp_path: Path) -> None:
     assert result.exit_code == 2
     assert "Ошибка в файле правил" in result.output
     assert "файл не найден" in result.output
+
+
+def test_missing_database_url_is_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)  # no .env here
+    result = CliRunner().invoke(
+        app, ["rules", "recheck", "--rules", str(ROOT / "config" / "rules.yaml")]
+    )
+    assert result.exit_code == 2
+    assert "Нет DATABASE_URL" in result.output and "Traceback" not in result.output
 
 
 def test_rules_recheck_with_missing_rules_exits_2(tmp_path: Path) -> None:
@@ -152,94 +167,17 @@ def test_profile_import_non_utf8_file_exits_2_without_traceback(tmp_path: Path) 
 # --- score / run --score: the CLI commits for real, so these use a truncated test database ----
 
 
-@pytest.fixture
-def cli_db(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
-    tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
-
-    def wipe() -> None:
-        with engine.begin() as conn:
-            conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
-
-    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    wipe()
-    yield engine
-    wipe()
-
-
-def _seed(engine: Engine, *, profile: bool = True, jobs: int = 0) -> None:
-    with Session(engine) as session, session.begin():
-        run = store.start_run(session, "seed", NOW)
-        if profile:
-            store.add_profile_version(
-                session,
-                resume_md="Fictional resume: ten years of widgets.",
-                targets_md="Fictional targets: remote widget work.",
-                note=None,
-                now=NOW,
-            )
-        for i in range(jobs):
-            raw = RawJob(
-                source="s",
-                source_job_id=f"seed-{i}",
-                source_url=f"https://seed.example/{i}",
-                title=f"Seed Engineer {i}",
-                company=f"Seed Company {i}",
-                description_html=f"<p>Seed job {i}</p>",
-            )
-            job = store.insert_job(session, normalize(raw), run.id, NOW)
-            store.set_job_state(session, job, "pending_score")
-
-
-class _FakeScorer:
-    """Stands in for `_make_scorer`: never runs `claude`, records how it was built."""
-
-    def __init__(self, result: ScoreResult) -> None:
-        self.result = result
-        self.workdirs: list[Path] = []
-        self.workdir_existed_at_call: list[bool] = []
-        self.messages: list[str] = []
-
-    def __call__(self, cfg: ScoringConfig, system_prompt: str, workdir: Path) -> Any:
-        assert system_prompt.strip()
-        self.workdirs.append(workdir)
-
-        def scorer(message: str) -> ScoreResult:
-            self.workdir_existed_at_call.append(workdir.is_dir())
-            self.messages.append(message)
-            return self.result
-
-        return scorer
-
-
-def _ok() -> ScoreResult:
-    return ScoreResult(ScoreStatus.OK, AXES, 100, 10, 0.1, "{}", None)
-
-
-def _invalid() -> ScoreResult:
-    return ScoreResult(ScoreStatus.INVALID_OUTPUT, None, 100, 10, 0.05, "{}", "skills_match: x")
-
-
-def _runs(engine: Engine, kind: str) -> list[Run]:
-    with Session(engine) as session:
-        return list(session.scalars(select(Run).where(Run.kind == kind).order_by(Run.started_at)))
-
-
-def _states(engine: Engine) -> list[str]:
-    with Session(engine) as session:
-        return sorted(session.scalars(select(Job.state)))
-
-
 def test_score_command_scores_pending_jobs(cli_db: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed(cli_db, jobs=2)
-    fake = _FakeScorer(_ok())
+    seed(cli_db, jobs=2)
+    fake = FakeScorer(ok_result())
     monkeypatch.setattr("aijobradar.cli._make_scorer", fake)
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 0, result.output
     assert "LLM: 2 ok · ≈$0.20 (оценка по API-ценам)" in result.output
-    (run,) = _runs(cli_db, "score")
+    (run,) = runs_of(cli_db, "score")
     assert run.status == "ok" and run.finished_at is not None
     assert run.counts["llm_ok"] == 2
-    assert _states(cli_db) == ["scored", "scored"]
+    assert job_states(cli_db) == ["scored", "scored"]
     with Session(cli_db) as session:
         assert len(session.scalars(select(LlmScore)).all()) == 2
     # The model runs in an empty scratch directory that exists only while scoring.
@@ -255,12 +193,12 @@ def test_real_make_scorer_runs_claude_in_a_scratch_directory(
 ) -> None:
     from aijobradar.scoring import claude_cli
 
-    _seed(cli_db, jobs=1)
+    seed(cli_db, jobs=1)
     seen: list[dict[str, Any]] = []
 
     def fake_score(**kwargs: Any) -> ScoreResult:
         seen.append({**kwargs, "cwd_is_dir": kwargs["cwd"].is_dir()})
-        return _ok()
+        return ok_result()
 
     monkeypatch.setattr(claude_cli, "score", fake_score)
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
@@ -276,31 +214,33 @@ def test_real_make_scorer_runs_claude_in_a_scratch_directory(
 def test_score_command_without_profile_exits_2(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed(cli_db, profile=False, jobs=1)
-    fake = _FakeScorer(_ok())
+    seed(cli_db, profile=False, jobs=1)
+    fake = FakeScorer(ok_result())
     monkeypatch.setattr("aijobradar.cli._make_scorer", fake)
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 2
     assert NO_PROFILE_MESSAGE in result.output
-    assert fake.messages == [] and _runs(cli_db, "score") == []
+    assert fake.messages == [] and runs_of(cli_db, "score") == []
 
 
 def test_score_command_with_failures_is_partial(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed(cli_db, jobs=1)
-    monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_invalid()))
+    seed(cli_db, jobs=1)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(invalid_result()))
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 0, result.output
-    assert "LLM: 0 ok · 1 invalid_output · первая ошибка: skills_match: x · ≈$0.05" in result.output
-    (run,) = _runs(cli_db, "score")
+    assert "⚠️ LLM: 0 ok · 1 invalid_output · первая ошибка: skills_match: x · ≈$0.05" in (
+        result.output
+    )
+    (run,) = runs_of(cli_db, "score")
     assert run.status == "partial" and run.counts["llm_invalid_output"] == 1
-    assert _states(cli_db) == ["pending_score"]
+    assert job_states(cli_db) == ["pending_score"]
 
 
 def test_score_command_respects_limit(cli_db: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed(cli_db, jobs=3)
-    monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_ok()))
+    seed(cli_db, jobs=3)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING), "--limit", "1"])
     assert result.exit_code == 0, result.output
     assert "LLM: 1 ok · 2 skipped_budget" in result.output
@@ -325,65 +265,34 @@ def test_score_command_with_missing_prompt_exits_2(cli_db: Engine, tmp_path: Pat
 def test_score_command_crash_reports_class_name_only(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed(cli_db, jobs=1)
+    seed(cli_db, jobs=1)
 
     def boom(*args: object, **kwargs: object) -> None:
         raise RuntimeError("Fictional Job Text secret")
 
-    monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_ok()))
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
     monkeypatch.setattr("aijobradar.scoring.engine.score_pending", boom)
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 1
     assert "Оценка прервалась: RuntimeError" in result.output
     assert "Fictional Job Text" not in result.output
-    (run,) = _runs(cli_db, "score")
+    (run,) = runs_of(cli_db, "score")
     assert run.status == "failed" and run.finished_at is not None
-
-
-def _write_run_files(tmp_path: Path) -> list[str]:
-    sources = tmp_path / "sources.yaml"
-    sources.write_text(
-        "himalayas: {enabled: false}\nwwr: {feeds: [remote-full-stack-programming-jobs]}\n"
-    )
-    profile = tmp_path / "profile.yaml"
-    profile.write_text("eligible_places: [PT, EU, EUROPE, EMEA, WORLDWIDE]\n")
-    return [
-        "run",
-        "--config",
-        str(sources),
-        "--profile",
-        str(profile),
-        "--rules",
-        str(ROOT / "config" / "rules.yaml"),
-        "--scoring",
-        str(SCORING),
-    ]
-
-
-def _mock_fetch() -> None:
-    respx.get(API_URL).mock(
-        return_value=httpx.Response(
-            200, json=json.loads(fixture_path("jobicy", "engineering.json").read_text())
-        )
-    )
-    respx.get(FEED_URL.format(slug="remote-full-stack-programming-jobs")).mock(
-        return_value=httpx.Response(200, content=fixture_path("wwr", "fullstack.rss").read_bytes())
-    )
 
 
 @respx.mock
 def test_run_scores_after_fetch_and_failures_make_it_partial(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _seed(cli_db)
-    _mock_fetch()
-    fake = _FakeScorer(_invalid())
+    seed(cli_db)
+    mock_fetch()
+    fake = FakeScorer(invalid_result())
     monkeypatch.setattr("aijobradar.cli._make_scorer", fake)
-    result = CliRunner().invoke(app, _write_run_files(tmp_path))
+    result = CliRunner().invoke(app, write_run_files(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Прогон: partial" in result.output
-    assert result.output.splitlines()[-1].startswith("LLM: 0 ok · 2 invalid_output")
-    (run,) = _runs(cli_db, "fetch")
+    assert result.output.splitlines()[-1].startswith("⚠️ LLM: 0 ok · 2 invalid_output")
+    (run,) = runs_of(cli_db, "fetch")
     assert run.status == "partial"
     assert run.counts["new"] == 4 and run.counts["llm_invalid_output"] == 2
     assert fake.workdir_existed_at_call == [True] * 2
@@ -394,62 +303,63 @@ def test_run_scores_after_fetch_and_failures_make_it_partial(
 def test_run_with_all_jobs_scored_stays_ok(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _seed(cli_db)
-    _mock_fetch()
-    monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_ok()))
-    result = CliRunner().invoke(app, _write_run_files(tmp_path))
+    seed(cli_db)
+    mock_fetch()
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+    result = CliRunner().invoke(app, write_run_files(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Прогон: ok" in result.output
     assert "LLM: 2 ok" in result.output
-    assert _runs(cli_db, "fetch")[0].counts["llm_ok"] == 2
+    assert runs_of(cli_db, "fetch")[0].counts["llm_ok"] == 2
 
 
 @respx.mock
 def test_run_keeps_fetch_results_when_scoring_crashes(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _seed(cli_db)
-    _mock_fetch()
+    seed(cli_db)
+    mock_fetch()
 
     def boom(*args: object, **kwargs: object) -> None:
         raise RuntimeError("Fictional Job Text secret")
 
-    monkeypatch.setattr("aijobradar.cli._make_scorer", _FakeScorer(_ok()))
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
     monkeypatch.setattr("aijobradar.scoring.engine.score_pending", boom)
-    result = CliRunner().invoke(app, _write_run_files(tmp_path))
+    result = CliRunner().invoke(app, write_run_files(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Оценка прервалась: RuntimeError" in result.output
     assert "Fictional Job Text" not in result.output
     assert "Прогон: partial" in result.output  # the fetch report is still printed
-    assert "LLM:" not in result.output
-    (run,) = _runs(cli_db, "fetch")
+    assert "⚠️ LLM: оценка прервалась (RuntimeError)" in result.output
+    assert "LLM: 0 ok" not in result.output  # no scoring counters: scoring never finished
+    (run,) = runs_of(cli_db, "fetch")
     assert run.status == "partial" and run.counts["new"] == 4
     assert "Fictional Job Text" not in str(run.counts)
-    assert _states(cli_db).count("pending_score") == 2  # fetched and filtered, just not scored
+    assert job_states(cli_db).count("pending_score") == 2  # fetched and filtered, just not scored
 
 
 @respx.mock
 def test_run_without_profile_in_db_exits_2_before_the_network(
     cli_db: Engine, tmp_path: Path
 ) -> None:
-    result = CliRunner().invoke(app, _write_run_files(tmp_path))  # no routes: any request fails
+    result = CliRunner().invoke(app, write_run_files(tmp_path))  # no routes: any request fails
     assert result.exit_code == 2
     assert NO_PROFILE_MESSAGE in result.output
-    assert _runs(cli_db, "fetch") == []
+    assert runs_of(cli_db, "fetch") == []
 
 
 @respx.mock
 def test_run_no_score_needs_no_profile_and_never_calls_the_model(
     cli_db: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _mock_fetch()
-    fake = _FakeScorer(_ok())
+    mock_fetch()
+    fake = FakeScorer(ok_result())
     monkeypatch.setattr("aijobradar.cli._make_scorer", fake)
-    result = CliRunner().invoke(app, [*_write_run_files(tmp_path), "--no-score"])
+    result = CliRunner().invoke(app, [*write_run_files(tmp_path), "--no-score"])
     assert result.exit_code == 0, result.output
     assert "Прогон: ok" in result.output and "LLM:" not in result.output
     assert fake.messages == [] and fake.workdirs == []
-    assert _states(cli_db).count("pending_score") == 2
+    assert job_states(cli_db).count("pending_score") == 2
 
 
 def test_run_with_missing_scoring_prompt_exits_2(tmp_path: Path) -> None:
@@ -490,7 +400,7 @@ def test_rules_recheck_reopens_rejections_of_other_rules_versions(cli_db: Engine
     )
     assert result.exit_code == 0, result.output
     assert result.output.strip() == "Вернул на проверку правилами: 1."
-    assert _states(cli_db) == ["new", "rejected"]
+    assert job_states(cli_db) == ["new", "rejected"]
     with Session(cli_db) as session:
         by_title = {j.title_raw: j.state for j in session.scalars(select(Job))}
     assert by_title == {"Recheck Engineer old": "new", "Recheck Engineer cur": "rejected"}

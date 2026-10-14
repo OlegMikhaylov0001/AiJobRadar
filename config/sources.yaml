@@ -6,6 +6,11 @@ himalayas:
   # Daily run + 6h margin for a late cron; data is cached for 24h, so one sync a day.
   max_pages: 500
   lookback_hours: 30
+  # Cap after an outage (gap since the last ok run + 6 h). 500 pages at <= 12 pages an hour
+  # is ~41 h: a walk cut off at max_pages is `degraded`, which never moves the anchor (the last
+  # `ok` run), so a longer cap would repeat the cut-off forever. After an outage longer than
+  # this the tail of the gap is lost: accepted.
+  max_lookback_hours: 40
   page_delay_s: 0.5
   parent_categories: [Developer]
 jobicy:

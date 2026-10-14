@@ -99,6 +99,24 @@ def test_xml_that_is_not_an_rss_channel_is_failed_not_empty() -> None:
 
 
 @respx.mock
+def test_foreign_root_tag_is_not_echoed() -> None:
+    respx.get(FULL).mock(return_value=httpx.Response(200, content=b"<SecretTag/>"))
+    with httpx.Client() as client:
+        result = run_adapter(WwrAdapter(feeds=("remote-full-stack-programming-jobs",)), client)
+    assert result.error == (
+        "remote-full-stack-programming-jobs: SourceFormatError: unexpected feed: not an RSS channel"
+    )
+
+
+@respx.mock
+def test_unparseable_xml_is_reduced_to_the_class_name() -> None:
+    respx.get(FULL).mock(return_value=httpx.Response(200, content=b"<rss>Secret text"))
+    with httpx.Client() as client:
+        result = run_adapter(WwrAdapter(feeds=("remote-full-stack-programming-jobs",)), client)
+    assert result.error == "remote-full-stack-programming-jobs: ParseError"
+
+
+@respx.mock
 def test_rss_channel_without_items_is_empty() -> None:
     respx.get(FULL).mock(
         return_value=httpx.Response(200, content=b"<rss><channel><title>t</title></channel></rss>")

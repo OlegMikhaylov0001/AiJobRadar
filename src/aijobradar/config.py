@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     database_url: str
     user_agent: str = "AiJobRadar/0.1 (personal job monitor)"
     http_timeout_s: float = 30.0
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
     @property
     def sqlalchemy_url(self) -> str:
@@ -34,8 +36,16 @@ class HimalayasConfig(BaseModel):
     enabled: bool = True
     max_pages: int = Field(500, ge=1)
     lookback_hours: int = Field(30, ge=1)
+    # 500 pages at <= 12 pages an hour is ~41 h: a longer cap could not be walked in full.
+    max_lookback_hours: int = Field(40, ge=1)
     page_delay_s: float = Field(0.5, ge=0)
     parent_categories: list[str] = Field(default_factory=lambda: ["Developer"])
+
+    @model_validator(mode="after")
+    def _check_lookback_cap(self) -> Self:
+        if self.max_lookback_hours < self.lookback_hours:
+            raise ValueError("max_lookback_hours must be >= lookback_hours")
+        return self
 
 
 class JobicyConfig(BaseModel):
@@ -126,6 +136,12 @@ class ScoringConfig(BaseModel):
     max_est_cost_usd_per_run: float = Field(gt=0)
     max_attempts: int = Field(ge=1)
     max_description_chars: int = Field(ge=1000)
+    # Digest selection (spec §6.5). The threshold is a starting point until eval (stage 5).
+    threshold: float = Field(60.0, ge=0, le=100)
+    top_n: int = Field(5, ge=0, le=10)
+    explore_n: int = Field(2, ge=0, le=5)
+    # Older postings (by posted_at, else first seen) are never sent.
+    max_age_days: int = Field(14, ge=1)
     weights: dict[str, float]
     penalties: dict[str, float]
     bonuses: dict[str, float]

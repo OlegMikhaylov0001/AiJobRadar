@@ -7,7 +7,7 @@ import httpx
 from defusedxml import ElementTree as SafeET
 
 from aijobradar.models import RawJob
-from aijobradar.sources.base import FeedRequest, Fetched, fetch_feeds
+from aijobradar.sources.base import FeedRequest, Fetched, SourceFormatError, fetch_feeds
 from aijobradar.sources.common import parse_rfc822_utc
 
 FEED_URL = "https://weworkremotely.com/categories/{slug}.rss"
@@ -49,7 +49,8 @@ def _extract(response: httpx.Response) -> list[Any]:
     root = SafeET.fromstring(response.content)
     channel = root.find("channel")
     if root.tag != "rss" or channel is None:  # any other XML would pass for an empty feed
-        raise ValueError(f"unexpected feed: <{root.tag}> is not an RSS channel")
+        # The root tag is not echoed: it comes from the source.
+        raise SourceFormatError("unexpected feed: not an RSS channel")
     return list(channel.findall("item"))
 
 
@@ -74,7 +75,7 @@ class WwrAdapter:
     def parse_record(self, item: Element) -> RawJob | None:
         company, separator, title = _text(item, "title").partition(": ")
         if not separator:
-            raise ValueError("title lacks the 'Company: Role' separator")
+            raise SourceFormatError("title lacks the 'Company: Role' separator")
         link = _text(item, "link") or _text(item, "guid")
         region = _text(item, "region")
         countries = split_countries(_text(item, "country"))

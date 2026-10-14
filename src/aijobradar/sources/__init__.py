@@ -5,13 +5,13 @@ from aijobradar.sources.jobicy import JobicyAdapter
 from aijobradar.sources.wwr import WwrAdapter
 
 
-def build_adapters(cfg: AppConfig) -> list[Adapter]:
+def build_adapters(cfg: AppConfig, *, himalayas_lookback_hours: int | None = None) -> list[Adapter]:
     adapters: list[Adapter] = []
     if cfg.himalayas.enabled:
         adapters.append(
             HimalayasAdapter(
                 max_pages=cfg.himalayas.max_pages,
-                lookback_hours=cfg.himalayas.lookback_hours,
+                lookback_hours=himalayas_lookback_hours or cfg.himalayas.lookback_hours,
                 page_delay_s=cfg.himalayas.page_delay_s,
                 parent_categories=tuple(cfg.himalayas.parent_categories),
             )

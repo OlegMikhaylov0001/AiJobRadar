@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -74,6 +75,12 @@ class Job(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     state: Mapped[str] = mapped_column(String(16), default="new")
+    # The score this job was marked `scored` by: its own, a cached one, or a twin's.
+    llm_score_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "llm_scores.id", ondelete="SET NULL", use_alter=True, name="fk_jobs_llm_score_id"
+        )
+    )
 
 
 class JobSource(Base):
@@ -162,3 +169,44 @@ class LlmScore(Base):
     raw_output: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Delivery(Base):
+    __tablename__ = "deliveries"
+    # A job is sent at most once, ever.
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_deliveries_job"),
+        CheckConstraint("state IN ('pending', 'sent', 'unknown')", name="ck_deliveries_state"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    slot: Mapped[str] = mapped_column(String(8))  # top | explore
+    position: Mapped[int] = mapped_column(Integer)
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # pending: committed before the send · sent: Telegram confirmed · unknown: the send may or
+    # may not have arrived. Every state excludes the job from later digests (at most once).
+    state: Mapped[str] = mapped_column(String(8))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Label(Base):
+    __tablename__ = "labels"
+    # One label per Telegram button press, however many times the update is re-read.
+    __table_args__ = (UniqueConstraint("source_ref", name="uq_labels_source_ref"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(8))  # fit | no_fit
+    reason: Mapped[str | None] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))  # telegram | ui | seed
+    source_ref: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Kv(Base):
+    __tablename__ = "kv"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)

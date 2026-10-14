@@ -1,9 +1,11 @@
+import dataclasses
 import json
 import random
 import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from aijobradar.config import AppConfig, DedupConfig
+from aijobradar.config import AppConfig, DedupConfig, HimalayasConfig, load_config
 from aijobradar.db.models import Job, Run, SourceRun
 from aijobradar.dedup import DedupOutcome
 from aijobradar.models import RawJob, SourceResult, SourceStatus
@@ -22,7 +24,10 @@ from aijobradar.pipeline import (
     FetchReport,
     RunStatus,
     apply_scoring_result,
+    format_delivery_line,
     format_report,
+    format_unresolved_line,
+    himalayas_lookback,
     run_fetch,
     run_status,
     scoring_counts,
@@ -34,10 +39,12 @@ from aijobradar.sources.base import Adapter, Fetched
 from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
 from aijobradar.sources.jobicy import API_URL, JobicyAdapter
 from aijobradar.sources.wwr import FEED_URL, WwrAdapter
+from aijobradar.telegram.deliver import DeliveryReport
 from tests.conftest import fixture_path
 from tests.rules_support import make_ctx
 
 NOW = datetime(2026, 9, 30, 6, tzinfo=UTC)
+SOURCES = Path(__file__).parent.parent / "config" / "sources.yaml"
 FINISHED = datetime(2026, 9, 30, 6, 5, tzinfo=UTC)
 
 
@@ -65,6 +72,18 @@ def test_run_status_is_failed_when_no_record_reached_the_database() -> None:
 def test_build_adapters_respects_enabled() -> None:
     cfg = AppConfig.model_validate({"jobicy": {"enabled": False}})
     assert [a.name for a in build_adapters(cfg)] == ["himalayas", "wwr"]
+
+
+def test_build_adapters_takes_the_himalayas_window_from_the_caller() -> None:
+    cfg = AppConfig.model_validate({"himalayas": {"lookback_hours": 30}})
+
+    def himalayas(adapters: list[Adapter]) -> HimalayasAdapter:
+        found = [a for a in adapters if isinstance(a, HimalayasAdapter)]
+        assert len(found) == 1
+        return found[0]
+
+    assert himalayas(build_adapters(cfg)).lookback_hours == 30
+    assert himalayas(build_adapters(cfg, himalayas_lookback_hours=56)).lookback_hours == 56
 
 
 def _mock_sources(jobicy_status: int = 200) -> None:
@@ -266,8 +285,48 @@ def test_real_database_error_rolls_back_only_that_record(session: Session) -> No
     assert report.sources[0].ingest_errors == 1
     assert session.scalars(select(Job.company_raw)).all() == ["Company fine"]  # no orphan job row
     source_run = session.scalars(select(SourceRun)).one()
-    assert source_run.error is not None and "\n" not in source_run.error
-    assert "ingest: 1 not stored" in source_run.error
+    # Class and SQLSTATE only: the driver's message can quote the rejected value.
+    assert source_run.error == (
+        "ingest: 1 not stored; first: StringDataRightTruncation (SQLSTATE 22001)"
+    )
+
+
+class _DriverError(Exception):
+    sqlstate = "22P02"
+
+
+@pytest.mark.parametrize(
+    ("orig", "expected"),
+    [
+        (
+            _DriverError("invalid input syntax: 'Secret Company text'"),
+            "_DriverError (SQLSTATE 22P02)",
+        ),
+        (ValueError("Secret Company text"), "ValueError"),
+    ],
+    ids=["with-sqlstate", "without-sqlstate"],
+)
+def test_ingest_driver_error_is_named_by_class_and_sqlstate_only(
+    session: Session, monkeypatch: pytest.MonkeyPatch, orig: Exception, expected: str
+) -> None:
+    from sqlalchemy.exc import DataError
+
+    import aijobradar.pipeline as pipeline
+
+    def reject(*args: Any, **kwargs: Any) -> DedupOutcome:
+        raise DataError("INSERT INTO jobs VALUES (%(x)s)", {"x": "Secret Company text"}, orig)
+
+    monkeypatch.setattr(pipeline, "ingest", reject)
+    with httpx.Client() as client:
+        report = run_fetch(
+            session,
+            [_OneRecordAdapter(records=("fine",))],
+            client,
+            now=NOW,
+            dedup_cfg=DedupConfig(),
+        )
+    assert report.sources[0].error == f"ingest: 1 not stored; first: {expected}"
+    assert "Secret Company" not in format_report(report)
 
 
 def test_run_where_no_record_was_stored_is_failed_and_committed_as_such(session: Session) -> None:
@@ -447,8 +506,21 @@ def test_format_report_llm_line() -> None:
         scoring=ScoringReport(ok=26, invalid_output=1, skipped_budget=1, est_cost_usd=0.414),
     )
     assert format_report(report).splitlines()[-1] == (
-        "LLM: 26 ok · 1 invalid_output · 1 skipped_budget · ≈$0.41 (оценка по API-ценам)"
+        # Failures mark the line like a degraded source: they made the run partial.
+        "⚠️ LLM: 26 ok · 1 invalid_output · 1 skipped_budget · ≈$0.41 (оценка по API-ценам)"
     )
+
+
+def test_format_report_names_a_scoring_crash_by_class() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.PARTIAL,
+        sources=[],
+        outcomes={},
+        scoring_error="RuntimeError",
+    )
+    assert format_report(report).splitlines()[-1] == "⚠️ LLM: оценка прервалась (RuntimeError)"
+    assert "оценка прервалась" not in format_report(dataclasses.replace(report, scoring_error=None))
 
 
 def test_format_report_llm_line_shows_cache_and_parked_and_zero_ok() -> None:
@@ -478,7 +550,7 @@ def test_format_report_llm_line_shows_first_error_before_cost() -> None:
         ),
     )
     assert format_report(report).splitlines()[-1] == (
-        "LLM: 3 ok · 2 invalid_output · первая ошибка: error_max_structured_output_retries"
+        "⚠️ LLM: 3 ok · 2 invalid_output · первая ошибка: error_max_structured_output_retries"
         " · ≈$0.60 (оценка по API-ценам)"
     )
 
@@ -503,3 +575,79 @@ def test_update_run_result_merges_counts(session: Session) -> None:
     refreshed = session.get(Run, run.id)
     assert refreshed is not None and refreshed.status == "partial"
     assert refreshed.counts == {"new": 1, "llm_ok": 2}
+
+
+@pytest.mark.parametrize(
+    ("report", "line"),
+    [
+        (DeliveryReport(top=3, explore=2), "Выдача: 3 выше порога + 2 🎲"),
+        (DeliveryReport(top=0, explore=2), "Выдача: подходящих нет + 2 🎲"),
+        (DeliveryReport(), "Выдача: подходящих нет"),
+        (
+            # The line shows every unresolved send in the database, not only this run's.
+            DeliveryReport(top=2, unknown=1, unresolved=3, interrupted=True),
+            "Выдача прервана: отправлено 2 выше порога · 3 не подтверждено (проверьте вручную)",
+        ),
+        (DeliveryReport(interrupted=True), "Выдача прервана: отправлено 0 выше порога"),
+        (
+            DeliveryReport(top=1, unresolved=2),
+            "Выдача: 1 выше порога · 2 не подтверждено (проверьте вручную)",
+        ),
+        (
+            DeliveryReport(top=5, explore=1, interrupted=True),
+            "Выдача прервана: отправлено 5 выше порога + 1 🎲",
+        ),
+    ],
+)
+def test_delivery_line(report: DeliveryReport, line: str) -> None:
+    assert format_delivery_line(report) == line
+
+
+def test_format_report_ends_with_the_delivery_line_only_when_delivered() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.OK,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(ok=1, est_cost_usd=0.1),
+    )
+    assert "Выдача" not in format_report(report)
+    delivered = dataclasses.replace(report, delivery=DeliveryReport(top=1))
+    assert format_report(delivered).splitlines()[-2].startswith("LLM:")
+    assert format_report(delivered).splitlines()[-1] == "Выдача: 1 выше порога"
+
+
+NOW_H = datetime(2026, 10, 14, 6, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("last_ok", "expected"),
+    [
+        (None, 30),  # first run: the configured window
+        (NOW_H - timedelta(hours=24), 30),  # daily cadence: the base window covers it
+        (NOW_H - timedelta(hours=30), 36),  # a late cron: gap + 6 h margin
+        (NOW_H - timedelta(hours=30, minutes=1), 37),  # partial hours round up
+        (NOW_H - timedelta(hours=50), 40),  # a missed day: capped
+        (NOW_H - timedelta(days=10), 40),  # long outage: capped
+    ],
+)
+def test_himalayas_window_covers_the_gap_since_last_success(
+    last_ok: datetime | None, expected: int
+) -> None:
+    assert himalayas_lookback(last_ok, NOW_H, base_hours=30, max_hours=40) == expected
+
+
+def test_himalayas_cap_fits_into_max_pages_in_the_shipped_config() -> None:
+    # A walk cut off at max_pages is `degraded`, which never moves the window anchor (the last
+    # `ok` run): a cap that needs more pages than max_pages would lock the source into a
+    # permanent degraded loop. The feed gives at most 12 pages an hour.
+    pages_per_hour = 12
+    shipped = load_config(SOURCES).himalayas
+    for cfg in (shipped, HimalayasConfig()):
+        assert cfg.max_lookback_hours * pages_per_hour <= cfg.max_pages
+
+
+def test_unresolved_line() -> None:
+    assert format_unresolved_line(2) == (
+        "⚠️ Не подтверждено доставок: 2 — проверьте вручную (README)"
+    )

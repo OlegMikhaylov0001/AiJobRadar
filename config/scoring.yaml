@@ -9,6 +9,12 @@ max_est_cost_usd_per_run: 3.0     # soft cap, checked before each wave (one wave
 max_attempts: 2                   # failed attempts per job before it is parked as score_failed
 max_description_chars: 12000
 
+# Digest (spec §6.5): up to top_n jobs scored >= threshold, plus explore_n random ones below it.
+threshold: 60          # starting point; tune with eval (stage 5)
+top_n: 5
+explore_n: 2
+max_age_days: 14       # postings older than this are never sent
+
 # final_score = 100 * weighted mean of the 0-4 axes, minus penalties, plus bonuses, clamped
 # to 0-100. geo_eligible=no or employer_country_excluded=yes -> 0 (combine.py).
 weights: {skills_match: 0.35, target_fit: 0.25, seniority_fit: 0.2, domain_match: 0.2}

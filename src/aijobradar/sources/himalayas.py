@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from aijobradar.models import RawJob
-from aijobradar.sources.base import Fetched, describe_error
+from aijobradar.sources.base import Fetched, SourceFormatError, describe_error
 from aijobradar.sources.common import parse_salary_period
 
 SEARCH_URL = "https://himalayas.app/jobs/api/search"
@@ -22,21 +22,21 @@ def _utcnow() -> datetime:
 def _count(payload: dict[str, Any], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:  # bool is an int
-        raise ValueError(f"unexpected response: '{key}' is not a non-negative integer")
+        raise SourceFormatError(f"unexpected response: '{key}' is not a non-negative integer")
     return value
 
 
 def _parse_page(payload: Any, page_no: int) -> tuple[list[Any], bool]:
     """Return the page's jobs and whether it is the last page; reject an unexpected envelope."""
     if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
-        raise ValueError("unexpected response: no 'jobs' list")
+        raise SourceFormatError("unexpected response: no 'jobs' list")
     offset, limit, total = (_count(payload, key) for key in ("offset", "limit", "totalCount"))
     # The end is computed from these counters, so they must describe the page we asked for.
     if limit < 1 or offset != (page_no - 1) * limit:
-        raise ValueError(f"unexpected response: offset/limit do not match page {page_no}")
+        raise SourceFormatError(f"unexpected response: offset/limit do not match page {page_no}")
     # An empty page is the end only past the last record; inside the range it hides jobs.
     if not payload["jobs"] and offset < total:
-        raise ValueError("unexpected response: empty page before totalCount")
+        raise SourceFormatError("unexpected response: empty page before totalCount")
     return payload["jobs"], offset + limit >= total
 
 
@@ -85,7 +85,7 @@ class HimalayasAdapter:
         categories = record.get("parentCategories")
         # A format change must not pass as out of scope: only a list of names is understood.
         if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
-            raise ValueError("record lacks a parentCategories list")
+            raise SourceFormatError("record lacks a parentCategories list")
         if self.parent_categories and not set(categories) & set(self.parent_categories):
             return None
         restrictions = list(record.get("locationRestrictions") or [])

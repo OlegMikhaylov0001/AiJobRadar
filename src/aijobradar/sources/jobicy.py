@@ -4,7 +4,7 @@ from typing import Any
 import httpx
 
 from aijobradar.models import RawJob
-from aijobradar.sources.base import FeedRequest, Fetched, fetch_feeds
+from aijobradar.sources.base import FeedRequest, Fetched, SourceFormatError, fetch_feeds
 from aijobradar.sources.common import parse_iso_utc, parse_salary_period
 
 API_URL = "https://jobicy.com/api/v2/remote-jobs"
@@ -14,12 +14,15 @@ _NO_RESTRICTION = frozenset({"", "anywhere", "worldwide"})
 def _extract(response: httpx.Response) -> list[Any]:
     payload = response.json()
     if not isinstance(payload, dict):
-        raise ValueError("unexpected response: not an object")
+        raise SourceFormatError("unexpected response: not an object")
     if payload.get("success") is False:
-        raise ValueError(f"jobicy success=false (statusCode={payload.get('statusCode')})")
+        code = payload.get("statusCode")
+        # Only a number is echoed: any other value is the source's text.
+        shown = f" (statusCode={code})" if type(code) is int else ""
+        raise SourceFormatError(f"jobicy success=false{shown}")
     jobs = payload.get("jobs")
     if not isinstance(jobs, list):  # a silent [] would pass for an empty source
-        raise ValueError("unexpected response: no 'jobs' list")
+        raise SourceFormatError("unexpected response: no 'jobs' list")
     return jobs
 
 

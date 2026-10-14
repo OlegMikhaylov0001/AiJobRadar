@@ -1,7 +1,11 @@
+import os
 import uuid
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 import yaml
@@ -10,11 +14,18 @@ from pydantic import ValidationError
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
-    from aijobradar.config import RulesConfig, ScoringConfig
+    from aijobradar.config import RulesConfig, ScoringConfig, Settings
     from aijobradar.pipeline import FetchReport
     from aijobradar.scoring.engine import Scorer, ScoringReport
+    from aijobradar.telegram.client import TelegramClient
+    from aijobradar.telegram.deliver import DeliveryReport
 
-app = typer.Typer(no_args_is_help=True, help="AiJobRadar: personal remote-job monitor.")
+# Locals in pretty tracebacks could print the Telegram URL, token included.
+app = typer.Typer(
+    no_args_is_help=True,
+    help="AiJobRadar: personal remote-job monitor.",
+    pretty_exceptions_show_locals=False,
+)
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 app.add_typer(db_app, name="db")
 profile_app = typer.Typer(no_args_is_help=True, help="Candidate profile (resume and targets).")
@@ -189,7 +200,8 @@ def _score_after_fetch(
         # Class name only: the message may carry job text.
         typer.echo(f"Оценка прервалась: {type(exc).__name__}", err=True)
         status = RunStatus.PARTIAL if report.status is RunStatus.OK else report.status
-        report, extra = dataclasses.replace(report, status=status), {}
+        report = dataclasses.replace(report, status=status, scoring_error=type(exc).__name__)
+        extra = {}
     try:
         with Session(engine) as session, session.begin():
             store.update_run_result(
@@ -197,6 +209,226 @@ def _score_after_fetch(
             )
     except Exception as exc:
         typer.echo(f"Не удалось записать итог оценки: {type(exc).__name__}", err=True)
+    return report
+
+
+_LOCK_ID = 4_204_2026  # one run/score per database at a time
+# labels-poll has its own key: it only writes labels and must not collide with the daily run.
+_LABELS_LOCK_ID = 4_204_2027
+
+
+def _settings() -> "Settings":
+    from aijobradar.config import Settings
+
+    try:
+        return Settings()
+    except ValidationError:
+        # Field names only: a validation message could echo a secret value.
+        typer.echo("Нет DATABASE_URL: задайте переменную окружения или .env.", err=True)
+        raise typer.Exit(2) from None
+
+
+@contextmanager
+def _run_lock(engine: "Engine", *, lock_id: int = _LOCK_ID) -> Iterator[None]:
+    from sqlalchemy import func, select
+
+    with engine.connect() as conn:
+        acquired = conn.execute(select(func.pg_try_advisory_lock(lock_id))).scalar()
+        conn.commit()  # the session-level lock survives the commit; no transaction stays open
+        if not acquired:
+            typer.echo("Другой прогон уже идёт.", err=True)
+            raise typer.Exit(1)
+        try:
+            yield
+        finally:
+            try:
+                conn.execute(select(func.pg_advisory_unlock(lock_id)))
+                conn.commit()
+            except Exception:
+                # A session-level lock dies with its connection, so a failed unlock (the
+                # connection itself is gone) must not turn a finished run into a crash or
+                # swallow the report that follows.
+                pass
+
+
+def _write_step_summary(text: str) -> None:
+    """Public Actions summary: the report holds statuses and counters, never job text."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"```\n{text}\n```\n")
+
+
+@dataclass(frozen=True)
+class _Digest:
+    """Where and how the daily digest goes out."""
+
+    client: "TelegramClient"
+    chat_id: str
+    cfg: "ScoringConfig"
+
+
+@contextmanager
+def _telegram_client(token: str, timeout_s: float) -> "Iterator[TelegramClient]":
+    import httpx
+
+    from aijobradar.telegram.client import TelegramClient
+
+    with httpx.Client(timeout=timeout_s) as http:
+        yield TelegramClient(token=token, http=http)
+
+
+def _database_reachable(engine: "Engine") -> bool:
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        with engine.connect():
+            return True
+    except OperationalError:
+        return False
+
+
+def _send_crash(digest: _Digest, *, reason: str, report_text: str | None) -> None:
+    from aijobradar.telegram.client import TelegramError
+    from aijobradar.telegram.deliver import send_crash
+
+    try:
+        send_crash(digest.client, chat_id=digest.chat_id, reason=reason, report_text=report_text)
+    except TelegramError as exc:
+        typer.echo(f"Telegram не принял: {exc}", err=True)  # the text is "<method>: <reason>"
+    except Exception as exc:
+        # Class name only: whatever else was raised may carry the token or job text.
+        typer.echo(f"Не удалось отправить сообщение о сбое: {type(exc).__name__}", err=True)
+
+
+def _failed_reason(report: "FetchReport") -> str:
+    from aijobradar.models import SourceStatus
+
+    if all(r.status is SourceStatus.FAILED for r in report.sources):
+        return "Все источники недоступны"
+    return "Ни одна запись не попала в БД"
+
+
+def _apply_migrations(url: str, digest: _Digest | None) -> None:
+    """`run --migrate`: a failed migration is a crash like an unreachable database."""
+    from aijobradar.db.migrate import upgrade
+
+    try:
+        upgrade(url)
+    except Exception as exc:
+        # Class name only: the message (and alembic's traceback) can carry the database host.
+        typer.echo(f"Миграция БД не удалась: {type(exc).__name__}", err=True)
+        if digest is not None:
+            _send_crash(digest, reason="Миграция БД не удалась", report_text=None)
+        raise typer.Exit(1) from None
+
+
+def _run_crashed(exc: Exception, digest: _Digest | None, report: "FetchReport | None") -> NoReturn:
+    """A failure the run did not expect: class name only, the crash message, exit 1."""
+    import dataclasses
+
+    from aijobradar.pipeline import RunStatus, format_report
+
+    reason = f"Прогон прервался: {type(exc).__name__}"
+    typer.echo(reason, err=True)
+    report_text = (
+        format_report(dataclasses.replace(report, status=RunStatus.FAILED))
+        if report is not None
+        else None
+    )
+    if digest is not None:
+        _send_crash(digest, reason=reason, report_text=report_text)
+    if report_text is not None:
+        typer.echo(report_text)
+        _write_step_summary(report_text)
+    raise typer.Exit(1) from None
+
+
+def _record_run_status(
+    engine: "Engine", report: "FetchReport", status: str, extra_counts: dict[str, int]
+) -> None:
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+
+    try:
+        with Session(engine) as session, session.begin():
+            store.update_run_result(
+                session, report.run_id, status=status, extra_counts=extra_counts
+            )
+    except Exception as exc:
+        typer.echo(f"Не удалось записать итог доставки: {type(exc).__name__}", err=True)
+
+
+def _delivery_counts(delivery: "DeliveryReport") -> dict[str, int]:
+    return {
+        "delivered_top": delivery.top,
+        "delivered_explore": delivery.explore,
+        "delivered_unknown": delivery.unknown,
+        "unresolved_unknown": delivery.unresolved,
+    }
+
+
+def _deliver_digest(engine: "Engine", digest: _Digest, report: "FetchReport") -> "FetchReport":
+    """Send the digest and record it; a refusal or crash fails the run (exit 1)."""
+    import dataclasses
+    import random
+
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+    from aijobradar.pipeline import RunStatus, format_report, format_unresolved_line
+    from aijobradar.select import select_digest
+    from aijobradar.telegram.client import TelegramError
+    from aijobradar.telegram.deliver import DeliveryReport, deliver_digest
+
+    now = datetime.now(UTC)
+    # Filled in as jobs go out: what was sent is still reported when the digest breaks off.
+    sent = DeliveryReport()
+    try:
+        # A session of its own: deliver_digest commits each delivery row before its send.
+        with Session(engine, expire_on_commit=False) as session:
+            # Under the run lock, before this run writes rows: any `pending` left is from a run
+            # that died around a send. It becomes `unknown`, counted as this run's finding.
+            sent.unknown = store.mark_pending_deliveries_unknown(session)
+            session.commit()
+            # All `unknown` rows, old ones included, are reported on every run until the owner
+            # resolves them: a run that dies before its report cannot swallow the notice.
+            sent.unresolved = store.count_unknown_deliveries(session)
+            picks = select_digest(session, cfg=digest.cfg, now=now, rng=random.Random())
+            footer = format_report(report)
+            if sent.unresolved:
+                footer += "\n" + format_unresolved_line(sent.unresolved)
+            delivery = deliver_digest(
+                session,
+                digest.client,
+                chat_id=digest.chat_id,
+                run_id=report.run_id,
+                picks=picks,
+                report_text=footer,
+                now=now,
+                report=sent,
+            )
+        report = dataclasses.replace(report, delivery=delivery)
+        with Session(engine) as session, session.begin():
+            store.update_run_result(
+                session,
+                report.run_id,
+                status=report.status.value,
+                extra_counts=_delivery_counts(delivery),
+            )
+    except Exception as exc:
+        if isinstance(exc, TelegramError):
+            typer.echo(f"Telegram не принял: {exc}", err=True)
+        else:
+            # Class name only: the message may carry job text.
+            typer.echo(f"Выдача прервалась: {type(exc).__name__}", err=True)
+        sent.interrupted = True
+        failed = dataclasses.replace(report, status=RunStatus.FAILED, delivery=sent)
+        _record_run_status(engine, failed, RunStatus.FAILED.value, _delivery_counts(sent))
+        typer.echo(format_report(failed))
+        _write_step_summary(format_report(failed))
+        raise typer.Exit(1) from None
     return report
 
 
@@ -212,15 +444,29 @@ def run(
     limit: int | None = typer.Option(
         None, min=1, help="At most N model calls this run (identical postings share one)."
     ),
+    deliver: bool = typer.Option(
+        False, "--deliver/--no-deliver", help="Send the digest to Telegram."
+    ),
+    migrate: bool = typer.Option(
+        False, "--migrate/--no-migrate", help="Apply database migrations before the run."
+    ),
 ) -> None:
-    """Fetch, deduplicate and store jobs, filter them with rules, then score them with the LLM."""
+    """Fetch, deduplicate and store jobs, filter them with rules, score them with the LLM and
+    optionally send the digest to Telegram."""
     import random
 
     from sqlalchemy.orm import Session
 
-    from aijobradar.config import Settings, load_config
+    from aijobradar import store
+    from aijobradar.config import load_config
     from aijobradar.db.session import make_engine
-    from aijobradar.pipeline import RunStatus, format_report, run_fetch
+    from aijobradar.pipeline import (
+        FetchReport,
+        RunStatus,
+        format_report,
+        himalayas_lookback,
+        run_fetch,
+    )
     from aijobradar.profile import ProfileMissing, load_profile
     from aijobradar.rules.context import build_rule_context
     from aijobradar.sources import build_adapters
@@ -250,39 +496,95 @@ def run(
         typer.echo(f"Профиль не согласован с {rules}: {exc}", err=True)
         raise typer.Exit(2) from None
     scoring_cfg, system_prompt = _load_scoring(scoring) if score else (None, "")
+    # The digest needs only the config (threshold, sizes), even when this run does not score.
+    digest_cfg = (scoring_cfg or _load_scoring(scoring)[0]) if deliver else None
 
-    settings = Settings()
+    settings = _settings()
+    token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
+    if deliver and not (token and chat_id):
+        typer.echo("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID.", err=True)
+        raise typer.Exit(2)
     cfg = load_config(config)
     engine = make_engine(settings.sqlalchemy_url)
-    # The database profile version is checked before the network, like the files above.
-    profile_id = _latest_profile_id(engine) if score else None
-    with (
-        make_client(settings.user_agent, settings.http_timeout_s) as client,
-        Session(engine) as session,
-        # A failed run is still committed: its statuses are the evidence. The connection is
-        # acquired lazily, so it is first used after run_fetch has finished all network I/O.
-        session.begin(),
-    ):
-        report = run_fetch(
-            session,
-            build_adapters(cfg),
-            client,
-            now=now,
-            dedup_cfg=cfg.dedup,
-            rules_ctx=rules_ctx,
-            rng=random.Random(),
-        )
-    # The fetch session has committed: scoring gets its own, and may fail without losing it.
-    if scoring_cfg is not None and profile_id is not None:
-        report = _score_after_fetch(
-            engine,
-            report,
-            profile_id=profile_id,
-            cfg=scoring_cfg,
-            system_prompt=system_prompt,
-            limit=limit,
-        )
+    report: FetchReport | None = None
+    with ExitStack() as stack:
+        digest: _Digest | None = None
+        if deliver and token and chat_id and digest_cfg:
+            telegram = stack.enter_context(_telegram_client(token, settings.http_timeout_s))
+            digest = _Digest(telegram, chat_id, digest_cfg)
+        if not _database_reachable(engine):
+            if digest is not None:
+                _send_crash(
+                    digest,
+                    reason="БД недоступна — без неё нельзя исключить повторы",
+                    report_text=None,
+                )
+            typer.echo("БД недоступна.", err=True)
+            raise typer.Exit(1)
+        if migrate:
+            _apply_migrations(settings.sqlalchemy_url, digest)
+        # The database can still go away after the check above (Neon, a long fetch): any late
+        # failure ends the run like the matrix says, by class name, never with a traceback that
+        # would print the driver's message (and the database host) into the public log.
+        try:
+            with _run_lock(engine):
+                # The database profile version is checked before the network, like the files.
+                profile_id = _latest_profile_id(engine) if score else None
+                # Himalayas walks back to its last successful run, so a late or missed cron
+                # loses nothing; computed before any network call.
+                lookback: int | None = None
+                if cfg.himalayas.enabled:
+                    with Session(engine) as session:
+                        last_ok = store.last_source_success(session, "himalayas")
+                    lookback = himalayas_lookback(
+                        last_ok,
+                        now,
+                        base_hours=cfg.himalayas.lookback_hours,
+                        max_hours=cfg.himalayas.max_lookback_hours,
+                    )
+                with (
+                    make_client(settings.user_agent, settings.http_timeout_s) as client,
+                    Session(engine) as session,
+                    # A failed run is still committed: its statuses are the evidence. The
+                    # connection is acquired lazily, so it is first used after run_fetch has
+                    # finished all network I/O.
+                    session.begin(),
+                ):
+                    report = run_fetch(
+                        session,
+                        build_adapters(cfg, himalayas_lookback_hours=lookback),
+                        client,
+                        now=now,
+                        dedup_cfg=cfg.dedup,
+                        rules_ctx=rules_ctx,
+                        rng=random.Random(),
+                    )
+                # The fetch session has committed: scoring gets its own, and may fail without
+                # losing it.
+                if scoring_cfg is not None and profile_id is not None:
+                    report = _score_after_fetch(
+                        engine,
+                        report,
+                        profile_id=profile_id,
+                        cfg=scoring_cfg,
+                        system_prompt=system_prompt,
+                        limit=limit,
+                    )
+                if digest is not None:
+                    if report.status is RunStatus.FAILED:
+                        _send_crash(
+                            digest,
+                            reason=_failed_reason(report),
+                            report_text=format_report(report),
+                        )
+                    else:
+                        report = _deliver_digest(engine, digest, report)
+        except typer.Exit:
+            raise
+        except Exception as exc:
+            _run_crashed(exc, digest, report)
     typer.echo(format_report(report))
+    _write_step_summary(format_report(report))
     if report.status is RunStatus.FAILED:
         raise typer.Exit(1)
 
@@ -298,37 +600,47 @@ def score(
     from sqlalchemy.orm import Session
 
     from aijobradar import store
-    from aijobradar.config import Settings
     from aijobradar.db.models import Run
     from aijobradar.db.session import make_engine
     from aijobradar.pipeline import format_scoring_line, scoring_counts
 
     cfg, system_prompt = _load_scoring(scoring)
-    engine = make_engine(Settings().sqlalchemy_url)
-    profile_id = _latest_profile_id(engine)
-    with Session(engine) as session, session.begin():
-        run_id = store.start_run(session, "score", datetime.now(UTC)).id
+    engine = make_engine(_settings().sqlalchemy_url)
     try:
-        report = _score_jobs(
-            engine,
-            run_id=run_id,
-            profile_id=profile_id,
-            cfg=cfg,
-            system_prompt=system_prompt,
-            limit=limit,
-        )
+        with _run_lock(engine):
+            profile_id = _latest_profile_id(engine)
+            with Session(engine) as session, session.begin():
+                run_id = store.start_run(session, "score", datetime.now(UTC)).id
+            try:
+                report = _score_jobs(
+                    engine,
+                    run_id=run_id,
+                    profile_id=profile_id,
+                    cfg=cfg,
+                    system_prompt=system_prompt,
+                    limit=limit,
+                )
+            except Exception as exc:
+                typer.echo(f"Оценка прервалась: {type(exc).__name__}", err=True)
+                with Session(engine) as session, session.begin():
+                    run_row = session.get(Run, run_id)
+                    if run_row is not None:
+                        store.finish_run(session, run_row, "failed", {}, datetime.now(UTC))
+                raise typer.Exit(1) from None
+            status = "partial" if report.failed else "ok"
+            with Session(engine) as session, session.begin():
+                run_row = session.get(Run, run_id)
+                if run_row is not None:
+                    store.finish_run(
+                        session, run_row, status, scoring_counts(report), datetime.now(UTC)
+                    )
+    except typer.Exit:
+        raise
     except Exception as exc:
+        # Lock, profile and run rows are database work too: a failure there is named by class
+        # only (the driver's message can carry the database host).
         typer.echo(f"Оценка прервалась: {type(exc).__name__}", err=True)
-        with Session(engine) as session, session.begin():
-            run_row = session.get(Run, run_id)
-            if run_row is not None:
-                store.finish_run(session, run_row, "failed", {}, datetime.now(UTC))
         raise typer.Exit(1) from None
-    status = "partial" if report.failed else "ok"
-    with Session(engine) as session, session.begin():
-        run_row = session.get(Run, run_id)
-        if run_row is not None:
-            store.finish_run(session, run_row, status, scoring_counts(report), datetime.now(UTC))
     typer.echo(format_scoring_line(report))
 
 
@@ -340,24 +652,92 @@ def rules_recheck(
     from sqlalchemy.orm import Session
 
     from aijobradar import store
-    from aijobradar.config import Settings
     from aijobradar.db.session import make_engine
 
     # Only the version is needed: no personal profile file is read.
     version = _load_rules_cfg(rules).version
-    engine = make_engine(Settings().sqlalchemy_url)
+    engine = make_engine(_settings().sqlalchemy_url)
     with Session(engine) as session, session.begin():
         reopened = store.reopen_rejected_from_other_versions(session, version)
     typer.echo(f"Вернул на проверку правилами: {reopened}.")
 
 
+@app.command("labels-poll")
+def labels_poll() -> None:
+    """Collect 👍/👎 presses from Telegram into the labels table."""
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+    from aijobradar.db.session import make_engine
+    from aijobradar.telegram.client import TelegramError
+    from aijobradar.telegram.labels import poll_labels
+
+    settings = _settings()
+    token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
+    if not (token and chat_id):
+        typer.echo("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID.", err=True)
+        raise typer.Exit(2)
+    engine = make_engine(settings.sqlalchemy_url)
+    if not _database_reachable(engine):
+        typer.echo("БД недоступна.", err=True)
+        raise typer.Exit(1)
+    try:
+        with (
+            _run_lock(engine, lock_id=_LABELS_LOCK_ID),
+            _telegram_client(token, settings.http_timeout_s) as client,
+            Session(engine) as session,
+        ):
+            run = store.start_run(session, "labels", datetime.now(UTC))
+            session.commit()
+            try:
+                report = poll_labels(session, client, chat_id=chat_id, now=datetime.now(UTC))
+            except Exception as exc:
+                session.rollback()
+                if isinstance(exc, TelegramError):
+                    typer.echo(f"Telegram не принял: {exc}", err=True)
+                else:
+                    # Class name only: the message may carry job text.
+                    typer.echo(f"Метки прервались: {type(exc).__name__}", err=True)
+                store.finish_run(session, run, "failed", {}, datetime.now(UTC))
+                session.commit()
+                raise typer.Exit(1) from None
+            counts = {
+                "updates": report.updates,
+                "labeled": report.labeled,
+                "ignored": report.ignored,
+            }
+            store.finish_run(session, run, "ok", counts, datetime.now(UTC))
+            session.commit()
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        # A database failure after the reachability check: class name only, never the
+        # driver's message (it can carry the database host).
+        typer.echo(f"Метки прервались: {type(exc).__name__}", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(
+        f"Метки: получено {report.updates}, записано {report.labeled}, пропущено {report.ignored}."
+    )
+
+
 @db_app.command("upgrade")
 def db_upgrade() -> None:
     """Apply database migrations to DATABASE_URL."""
-    from aijobradar.config import Settings
+    from sqlalchemy.exc import OperationalError
+
     from aijobradar.db.migrate import upgrade
 
-    upgrade(Settings().sqlalchemy_url)
+    url = _settings().sqlalchemy_url
+    try:
+        upgrade(url)
+    except OperationalError:
+        # No traceback: it would print the database host into a public log.
+        typer.echo("БД недоступна.", err=True)
+        raise typer.Exit(1) from None
+    except Exception as exc:
+        # Class name only, for the same reason (Alembic and the driver quote the connection).
+        typer.echo(f"Миграция БД не удалась: {type(exc).__name__}", err=True)
+        raise typer.Exit(1) from None
     typer.echo("Миграции применены.")
 
 
@@ -387,11 +767,10 @@ def profile_import(
     from sqlalchemy.orm import Session
 
     from aijobradar import store
-    from aijobradar.config import Settings
     from aijobradar.db.session import make_engine
 
     resume_md, targets_md = _read_profile_doc(resume), _read_profile_doc(targets)
-    engine = make_engine(Settings().sqlalchemy_url)
+    engine = make_engine(_settings().sqlalchemy_url)
     with Session(engine) as session, session.begin():
         version, created = store.add_profile_version(
             session, resume_md=resume_md, targets_md=targets_md, note=note, now=datetime.now(UTC)

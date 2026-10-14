@@ -192,3 +192,19 @@ def test_prompt_version_and_model_fit_the_db_columns() -> None:
     for field, too_long in (("prompt_version", "p" * 33), ("model", "m" * 65)):
         with pytest.raises(ValidationError):
             ScoringConfig.model_validate({**data, field: too_long})
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"), [("threshold", 101), ("threshold", -1), ("top_n", 11), ("explore_n", 6)]
+)
+def test_digest_settings_are_bounded(field: str, bad: float) -> None:
+    data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    data[field] = bad
+    with pytest.raises(ValidationError):
+        ScoringConfig.model_validate(data)
+
+
+def test_digest_settings_load_from_repo_config() -> None:
+    # The bounded test above also passes when the field is missing (extra keys are forbidden),
+    # so pin the shipped values too.
+    assert (CFG.threshold, CFG.top_n, CFG.explore_n, CFG.max_age_days) == (60.0, 5, 2, 14)

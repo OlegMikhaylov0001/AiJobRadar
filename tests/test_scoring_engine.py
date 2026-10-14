@@ -205,11 +205,11 @@ def _flaky_writes(monkeypatch: pytest.MonkeyPatch, fail_on: set[int], exc: Excep
     real = store.record_llm_score
     calls = {"n": 0}
 
-    def flaky(*args: Any, **kwargs: Any) -> None:
+    def flaky(*args: Any, **kwargs: Any) -> int:
         calls["n"] += 1
         if calls["n"] in fail_on:
             raise exc
-        real(*args, **kwargs)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(store, "record_llm_score", flaky)
 
@@ -264,12 +264,12 @@ def test_race_with_a_stored_ok_score_is_adopted_and_the_run_goes_on(
     cfg = CFG.model_copy(update={"parallelism": 1})
     real = store.record_llm_score
 
-    def racing(*args: Any, **kwargs: Any) -> None:
+    def racing(*args: Any, **kwargs: Any) -> int:
         # A concurrent run commits the same key first; our own insert then conflicts.
         monkeypatch.setattr(store, "record_llm_score", real)
         real(*args, **kwargs)
         session.commit()
-        real(*args, **kwargs)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(store, "record_llm_score", racing)
     scorer = _scorer(_ok())
@@ -379,3 +379,24 @@ def test_exhausted_cli_structured_retries_park_the_job(session: Session) -> None
     assert len(runner_calls) == CFG.max_attempts
     assert session.scalars(select(Job)).one().state == "score_failed"
     assert {r.status for r in session.scalars(select(LlmScore))} == {"invalid_output"}
+
+
+def test_scored_jobs_point_at_their_score(session: Session) -> None:
+    run_id, profile, _ = _setup(session, 1)
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_ok()), now=NOW)
+    job = session.scalars(select(Job)).one()
+    row = session.scalars(select(LlmScore)).one()
+    assert job.llm_score_id == row.id
+
+
+def test_cached_and_twin_jobs_point_at_the_shared_score(session: Session) -> None:
+    run_id, profile = _twins(session)
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_ok()), now=NOW)
+    row = session.scalars(select(LlmScore)).one()
+    assert {j.llm_score_id for j in session.scalars(select(Job))} == {row.id}
+    for job in session.scalars(select(Job)):
+        store.set_job_state(session, job, "pending_score")
+        job.llm_score_id = None
+    session.commit()
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_ok()), now=NOW)
+    assert {j.llm_score_id for j in session.scalars(select(Job))} == {row.id}  # from the cache

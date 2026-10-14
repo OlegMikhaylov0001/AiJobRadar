@@ -1,4 +1,5 @@
 import dataclasses
+import math
 import random
 import uuid
 from collections import Counter
@@ -21,8 +22,26 @@ from aijobradar.rules.context import RuleContext
 from aijobradar.rules.engine import RulesReport, apply_rules
 from aijobradar.scoring.engine import ScoringReport
 from aijobradar.sources.base import Adapter, run_adapter
+from aijobradar.telegram.deliver import DeliveryReport
 
-_STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: "⚠️ "}
+_WARNING = "⚠️ "
+_STATUS_MARK = {SourceStatus.FAILED: "❌ ", SourceStatus.DEGRADED: _WARNING}
+
+
+def himalayas_lookback(
+    last_ok: datetime | None,
+    now: datetime,
+    *,
+    base_hours: int,
+    max_hours: int,
+    margin_hours: int = 6,
+) -> int:
+    """Walk back to the last successful Himalayas run (plus a margin), so a late or missed cron
+    does not silently lose jobs; never less than the configured window, never more than the cap."""
+    if last_ok is None:
+        return base_hours
+    gap = math.ceil((now - last_ok).total_seconds() / 3600) + margin_hours
+    return min(max(base_hours, gap), max_hours)
 
 
 class RunStatus(StrEnum):
@@ -39,6 +58,8 @@ class FetchReport:
     outcomes: dict[DedupOutcome, int]
     rules: RulesReport | None = None
     scoring: ScoringReport | None = None
+    scoring_error: str | None = None  # class name of an exception that aborted scoring
+    delivery: DeliveryReport | None = None
 
 
 def run_status(results: Sequence[SourceResult]) -> RunStatus:
@@ -55,10 +76,12 @@ def run_status(results: Sequence[SourceResult]) -> RunStatus:
 
 
 def _describe_ingest_error(exc: Exception) -> str:
-    """One line without row values: SQLAlchemy's own message embeds the bound parameters."""
+    """Class and SQLSTATE only: SQLAlchemy's message embeds the bound parameters and the
+    driver's own message can quote the rejected value."""
     if isinstance(exc, DBAPIError):
-        first_line = str(exc.orig).splitlines()[0] if str(exc.orig) else ""
-        return f"{type(exc.orig).__name__}: {first_line}"[:200]
+        sqlstate = getattr(exc.orig, "sqlstate", None)
+        name = type(exc.orig).__name__
+        return f"{name} (SQLSTATE {sqlstate})" if isinstance(sqlstate, str) else name
     return type(exc).__name__
 
 
@@ -182,7 +205,26 @@ def format_scoring_line(s: ScoringReport) -> str:
             parts.append(f"{count} {label}")
     if s.failed and s.first_error:
         parts.append(f"первая ошибка: {s.first_error}")
-    return "LLM: " + " · ".join(parts) + f" · ≈${s.est_cost_usd:.2f} (оценка по API-ценам)"
+    # Failures make the run partial: the line is marked like a degraded source.
+    mark = _WARNING if s.failed else ""
+    return f"{mark}LLM: " + " · ".join(parts) + f" · ≈${s.est_cost_usd:.2f} (оценка по API-ценам)"
+
+
+def format_delivery_line(d: DeliveryReport) -> str:
+    if d.interrupted:  # what actually went out before the failure
+        line = f"Выдача прервана: отправлено {d.top} выше порога"
+    else:
+        line = f"Выдача: {d.top} выше порога" if d.top else "Выдача: подходящих нет"
+    line += f" + {d.explore} 🎲" if d.explore else ""
+    # Every unresolved `unknown` send, from any run: never repeated, to be checked by hand.
+    if d.unresolved:
+        line += f" · {d.unresolved} не подтверждено (проверьте вручную)"
+    return line
+
+
+def format_unresolved_line(count: int) -> str:
+    """Footer line, repeated on every delivery until the owner resolves the rows."""
+    return f"{_WARNING}Не подтверждено доставок: {count} — проверьте вручную (README)"
 
 
 def format_report(report: FetchReport) -> str:
@@ -221,4 +263,8 @@ def format_report(report: FetchReport) -> str:
         lines.append(f"В очередь разбора отсева: {rr.sampled}")
     if report.scoring is not None:
         lines.append(format_scoring_line(report.scoring))
+    elif report.scoring_error:
+        lines.append(f"{_WARNING}LLM: оценка прервалась ({report.scoring_error})")
+    if report.delivery is not None:
+        lines.append(format_delivery_line(report.delivery))
     return "\n".join(lines)
