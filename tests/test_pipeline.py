@@ -18,8 +18,17 @@ from aijobradar.db.models import Job, Run, SourceRun
 from aijobradar.dedup import DedupOutcome
 from aijobradar.models import RawJob, SourceResult, SourceStatus
 from aijobradar.normalize import NormalizedJob
-from aijobradar.pipeline import FetchReport, RunStatus, format_report, run_fetch, run_status
+from aijobradar.pipeline import (
+    FetchReport,
+    RunStatus,
+    apply_scoring_result,
+    format_report,
+    run_fetch,
+    run_status,
+    scoring_counts,
+)
 from aijobradar.rules.engine import RuleFn, RulesReport, apply_rules
+from aijobradar.scoring.engine import ScoringReport
 from aijobradar.sources import build_adapters
 from aijobradar.sources.base import Adapter, Fetched
 from aijobradar.sources.himalayas import SEARCH_URL, HimalayasAdapter
@@ -400,3 +409,66 @@ def test_run_without_rules_ctx_has_no_rules_report(session: Session) -> None:
     run = session.get(Run, report.run_id)
     assert run is not None
     assert not [k for k in run.counts if k.startswith(("rules_", "review_"))]
+
+
+def test_scoring_failures_make_ok_run_partial() -> None:
+    base = FetchReport(run_id=uuid.UUID(int=1), status=RunStatus.OK, sources=[], outcomes={})
+    assert apply_scoring_result(base, ScoringReport(ok=3)).status is RunStatus.OK
+    partial = apply_scoring_result(base, ScoringReport(ok=3, invalid_output=1))
+    assert partial.status is RunStatus.PARTIAL
+    failed = FetchReport(run_id=uuid.UUID(int=1), status=RunStatus.FAILED, sources=[], outcomes={})
+    assert apply_scoring_result(failed, ScoringReport(error=1)).status is RunStatus.FAILED
+    assert apply_scoring_result(base, ScoringReport(skipped_budget=5)).status is RunStatus.OK
+
+
+def test_scoring_counts_keys() -> None:
+    counts = scoring_counts(ScoringReport(ok=2, cached=1, skipped_budget=3, est_cost_usd=0.4567))
+    assert counts["llm_ok"] == 2 and counts["llm_cached"] == 1 and counts["llm_skipped_budget"] == 3
+    assert counts["llm_est_cost_usd"] == 0.4567
+    assert set(counts) == {
+        "llm_ok",
+        "llm_cached",
+        "llm_invalid_output",
+        "llm_refused",
+        "llm_error",
+        "llm_skipped_budget",
+        "llm_parked",
+        "llm_est_cost_usd",
+    }
+
+
+def test_format_report_llm_line() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.PARTIAL,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(ok=26, invalid_output=1, skipped_budget=1, est_cost_usd=0.414),
+    )
+    assert format_report(report).splitlines()[-1] == (
+        "LLM: 26 ok · 1 invalid_output · 1 skipped_budget · ≈$0.41 (оценка по API-ценам)"
+    )
+
+
+def test_format_report_llm_line_shows_cache_and_parked_and_zero_ok() -> None:
+    report = FetchReport(
+        run_id=uuid.UUID(int=1),
+        status=RunStatus.OK,
+        sources=[],
+        outcomes={},
+        scoring=ScoringReport(cached=4, parked=2),
+    )
+    assert format_report(report).splitlines()[-1] == (
+        "LLM: 0 ok · 4 из кэша · 2 отложено после попыток · ≈$0.00 (оценка по API-ценам)"
+    )
+
+
+def test_update_run_result_merges_counts(session: Session) -> None:
+    from aijobradar import store
+
+    run = store.start_run(session, "fetch", NOW)
+    store.finish_run(session, run, "ok", {"new": 1}, NOW)
+    store.update_run_result(session, run.id, status="partial", extra_counts={"llm_ok": 2})
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None and refreshed.status == "partial"
+    assert refreshed.counts == {"new": 1, "llm_ok": 2}

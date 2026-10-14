@@ -1,6 +1,7 @@
 """All database reads and writes. Nothing else in the package touches the ORM session."""
 
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -34,11 +35,23 @@ def start_run(session: Session, kind: str, now: datetime) -> Run:
 
 
 def finish_run(
-    session: Session, run: Run, status: str, counts: dict[str, int], now: datetime
+    session: Session, run: Run, status: str, counts: Mapping[str, float | int], now: datetime
 ) -> None:
     run.status = status
-    run.counts = counts
+    run.counts = dict(counts)
     run.finished_at = now
+    session.flush()
+
+
+def update_run_result(
+    session: Session, run_id: uuid.UUID, *, status: str, extra_counts: Mapping[str, float | int]
+) -> None:
+    """Add counters to a finished run (e.g. scoring after fetch) and set its final status."""
+    run = session.get(Run, run_id)
+    if run is None:
+        raise LookupError("run not found")
+    run.status = status
+    run.counts = {**run.counts, **extra_counts}
     session.flush()
 
 
