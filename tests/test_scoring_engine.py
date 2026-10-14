@@ -275,6 +275,7 @@ def test_race_with_a_stored_ok_score_is_adopted_and_the_run_goes_on(
     scorer = _scorer(_ok())
     report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
     assert (report.ok, report.cached, report.error, report.skipped_db_error) == (1, 1, 0, 0)
+    assert report.first_error is None  # a resolved race is not an error
     assert len(scorer.calls) == 2
     assert {j.state for j in session.scalars(select(Job))} == {"scored"}
 

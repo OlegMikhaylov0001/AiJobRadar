@@ -180,13 +180,13 @@ def _record(
             break
         except IntegrityError as exc:
             session.rollback()
-            report.first_error = report.first_error or type(exc).__name__
             # Safe only if another writer really stored an ok score for this key (a concurrent
             # run). Any other integrity error (e.g. a foreign key) lost the result: fail closed.
             if _adopt_existing_score(session, pending, ver):
                 report.cached += pending.size
                 return True
             report.error += 1
+            report.first_error = report.first_error or type(exc).__name__
             return False
         except Exception as exc:
             session.rollback()
