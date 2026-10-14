@@ -539,6 +539,45 @@ def rules_recheck(
     typer.echo(f"Вернул на проверку правилами: {reopened}.")
 
 
+@app.command("labels-poll")
+def labels_poll() -> None:
+    """Collect 👍/👎 presses from Telegram into the labels table."""
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+    from aijobradar.db.session import make_engine
+    from aijobradar.telegram.client import TelegramError
+    from aijobradar.telegram.labels import poll_labels
+
+    settings = _settings()
+    token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
+    if not (token and chat_id):
+        typer.echo("Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID.", err=True)
+        raise typer.Exit(2)
+    engine = make_engine(settings.sqlalchemy_url)
+    with (
+        _run_lock(engine),
+        _telegram_client(token, settings.http_timeout_s) as client,
+        Session(engine) as session,
+    ):
+        run = store.start_run(session, "labels", datetime.now(UTC))
+        session.commit()
+        try:
+            report = poll_labels(session, client, chat_id=chat_id, now=datetime.now(UTC))
+        except TelegramError as exc:
+            session.rollback()
+            typer.echo(f"Telegram не принял: {exc}", err=True)
+            store.finish_run(session, run, "failed", {}, datetime.now(UTC))
+            session.commit()
+            raise typer.Exit(1) from None
+        counts = {"updates": report.updates, "labeled": report.labeled, "ignored": report.ignored}
+        store.finish_run(session, run, "ok", counts, datetime.now(UTC))
+        session.commit()
+    typer.echo(
+        f"Метки: получено {report.updates}, записано {report.labeled}, пропущено {report.ignored}."
+    )
+
+
 @db_app.command("upgrade")
 def db_upgrade() -> None:
     """Apply database migrations to DATABASE_URL."""

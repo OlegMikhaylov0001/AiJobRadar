@@ -1,0 +1,150 @@
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from aijobradar import store
+from aijobradar.db.models import Label
+from aijobradar.models import RawJob
+from aijobradar.normalize import normalize
+from aijobradar.telegram.client import TelegramError
+from aijobradar.telegram.labels import OFFSET_KEY, poll_labels
+
+NOW = datetime(2026, 10, 14, 9, tzinfo=UTC)
+
+
+class FakeTelegram:
+    def __init__(self, updates: list[Any], answer_fails: bool = False) -> None:
+        self.updates = updates
+        self.offsets: list[int] = []
+        self.answers: list[str] = []
+        self.answer_fails = answer_fails
+
+    def get_updates(self, offset: int) -> list[Any]:
+        self.offsets.append(offset)
+        return [
+            u
+            for u in self.updates
+            if not isinstance(u, dict)
+            or not isinstance(u.get("update_id"), int)
+            or u["update_id"] >= offset
+        ]
+
+    def answer_callback(self, callback_id: str, text: str) -> None:
+        if self.answer_fails:
+            raise TelegramError("answerCallbackQuery: HTTP 400")
+        self.answers.append(callback_id)
+
+
+def _delivery(session: Session) -> int:
+    run = store.start_run(session, "daily", NOW)
+    raw = RawJob(
+        source="wwr",
+        source_job_id="1",
+        source_url="https://wwr.example/1",
+        title="Engineer",
+        company="Co",
+        description_html="<p>x</p>",
+    )
+    job = store.insert_job(session, normalize(raw), run.id, NOW)
+    delivery = store.create_delivery(
+        session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
+    )
+    return delivery.id
+
+
+def _press(update_id: int, data: str, chat: int = 42, cb: str | None = None) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": cb or f"cb-{update_id}",
+            "data": data,
+            "message": {"chat": {"id": chat}},
+        },
+    }
+
+
+def _labels(session: Session) -> list[str]:
+    return [row.label for row in session.scalars(select(Label).order_by(Label.id))]
+
+
+def test_presses_become_labels_and_offset_moves(session: Session) -> None:
+    d = _delivery(session)
+    tg = FakeTelegram([_press(10, f"l:{d}:1"), _press(11, f"l:{d}:0")])
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert (report.updates, report.labeled, report.ignored) == (2, 2, 0)
+    assert _labels(session) == ["fit", "no_fit"]
+    assert store.get_kv(session, OFFSET_KEY) == "12"
+    assert tg.answers == ["cb-10", "cb-11"]
+    assert poll_labels(session, tg, chat_id="42", now=NOW).updates == 0  # type: ignore[arg-type]
+    assert tg.offsets == [0, 12]
+
+
+def test_foreign_chats_and_garbage_are_ignored_but_consumed(session: Session) -> None:
+    d = _delivery(session)
+    tg = FakeTelegram(
+        [
+            _press(1, f"l:{d}:1", chat=999),
+            _press(2, "l:999999:1"),
+            _press(3, "garbage"),
+            {"update_id": 4, "message": {"text": "hi"}},
+        ]
+    )
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert (report.updates, report.labeled, report.ignored) == (4, 0, 4)
+    assert session.scalars(select(Label)).all() == []
+    assert store.get_kv(session, OFFSET_KEY) == "5"
+    assert tg.answers == []
+
+
+def test_malformed_updates_are_ignored_not_fatal(session: Session) -> None:
+    d = _delivery(session)
+    data = f"l:{d}:1"
+
+    def query(**overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {"id": "cb", "data": data, "message": {"chat": {"id": 42}}}
+        return {**base, **overrides}
+
+    tg = FakeTelegram(
+        [
+            "junk",
+            None,
+            {"callback_query": query()},  # no update_id
+            {"update_id": "5", "callback_query": query()},  # non-int update_id
+            {"update_id": True, "callback_query": query()},  # bool is not an update id
+            {"update_id": 6, "callback_query": "x"},  # callback_query not a dict
+            {"update_id": 7, "callback_query": query(message=None)},  # message missing
+            {"update_id": 8, "callback_query": query(message="m")},  # message not a dict
+            {"update_id": 9, "callback_query": query(message={"chat": "c"})},  # chat not a dict
+            {"update_id": 10, "callback_query": query(message={"chat": {}})},  # chat id missing
+            {"update_id": 11, "callback_query": query(data=5)},  # data not a string
+            {"update_id": 12, "callback_query": query(id=None)},  # no callback id
+            {"update_id": 13, "callback_query": query(id="")},  # empty callback id
+            _press(20, data, cb="good"),
+        ]
+    )
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert (report.updates, report.labeled, report.ignored) == (14, 1, 13)
+    assert _labels(session) == ["fit"]
+    assert store.get_kv(session, OFFSET_KEY) == "21"
+    assert tg.answers == ["good"]
+
+
+def test_reread_press_is_not_labeled_twice(session: Session) -> None:
+    d = _delivery(session)
+    first = FakeTelegram([_press(7, f"l:{d}:1", cb="same")])
+    poll_labels(session, first, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    store.set_kv(session, OFFSET_KEY, "0")  # as if the offset write had been lost
+    again = FakeTelegram([_press(7, f"l:{d}:1", cb="same")])
+    report = poll_labels(session, again, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert len(session.scalars(select(Label)).all()) == 1
+    assert (report.labeled, report.ignored) == (0, 1)
+
+
+def test_a_failed_answer_does_not_fail_the_poll(session: Session) -> None:
+    d = _delivery(session)
+    tg = FakeTelegram([_press(1, f"l:{d}:1")], answer_fails=True)
+    report = poll_labels(session, tg, chat_id="42", now=NOW)  # type: ignore[arg-type]
+    assert report.labeled == 1
+    assert store.get_kv(session, OFFSET_KEY) == "2"

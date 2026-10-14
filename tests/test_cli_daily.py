@@ -9,6 +9,7 @@ fixtures are scored but never picked and the digest is exactly the seeded jobs.
 import itertools
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,11 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner, Result
 
+from aijobradar import store
 from aijobradar.cli import _LOCK_ID, app
-from aijobradar.db.models import Delivery
+from aijobradar.db.models import Delivery, Label
+from aijobradar.models import RawJob
+from aijobradar.normalize import normalize
 from aijobradar.scoring.claude_cli import ScoreResult, ScoreStatus
 from aijobradar.sources.jobicy import API_URL
 from aijobradar.sources.wwr import FEED_URL
@@ -423,3 +427,89 @@ def test_deliver_without_score_sends_jobs_scored_earlier(
     texts = _texts(telegram)
     assert len(texts) == 4 and "Выше порога: 2" in texts[0]
     assert len(_deliveries(cli_db)) == 2
+
+
+GET_UPDATES = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+ANSWER = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
+
+
+def _seed_delivery(engine: Engine) -> int:
+    now = datetime(2026, 10, 14, 9, tzinfo=UTC)
+    raw = RawJob(
+        source="s",
+        source_job_id="labels-1",
+        source_url="https://seed.example/labels-1",
+        title="Labelled Engineer",
+        company="Labelled Company",
+        description_html="<p>x</p>",
+    )
+    with Session(engine) as session, session.begin():
+        run = store.start_run(session, "daily", now)
+        job = store.insert_job(session, normalize(raw), run.id, now)
+        delivery = store.create_delivery(
+            session, job_id=job.id, run_id=run.id, slot="top", position=1, now=now
+        )
+        return delivery.id
+
+
+def test_labels_poll_records_a_press(
+    respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path
+) -> None:
+    delivery_id = _seed_delivery(cli_db)
+    press = {
+        "update_id": 5,
+        "callback_query": {
+            "id": "cb-5",
+            "data": f"l:{delivery_id}:1",
+            "message": {"chat": {"id": 42}},
+        },
+    }
+    updates = respx_mock.post(GET_UPDATES).mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": [press]})
+    )
+    answer = respx_mock.post(ANSWER).mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": True})
+    )
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
+    assert result.exit_code == 0, result.output
+    assert "Метки: получено 1, записано 1, пропущено 0." in result.output
+    assert json.loads(updates.calls[0].request.content)["offset"] == 0
+    assert len(answer.calls) == 1
+    with Session(cli_db) as session:
+        assert [row.label for row in session.scalars(select(Label))] == ["fit"]
+        assert store.get_kv(session, "telegram_update_offset") == "6"
+    (run,) = runs_of(cli_db, "labels")
+    assert run.status == "ok"
+    assert run.counts == {"updates": 1, "labeled": 1, "ignored": 0}
+
+
+def test_labels_poll_telegram_rejects_exits_1_and_marks_run_failed(
+    respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path
+) -> None:
+    body = {"ok": False, "error_code": 400, "description": "Bad Request: SECRET"}
+    respx_mock.post(GET_UPDATES).mock(return_value=httpx.Response(400, json=body))
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
+    assert result.exit_code == 1
+    assert "Telegram не принял: getUpdates: HTTP 400" in result.stderr
+    assert "SECRET" not in result.output and TOKEN not in result.output
+    (run,) = runs_of(cli_db, "labels")
+    assert run.status == "failed"
+
+
+def test_labels_poll_without_telegram_settings_exits_2_before_network(
+    respx_mock: respx.MockRouter, cli_db: Engine, daily_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID")
+    updates = respx_mock.post(GET_UPDATES)
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
+    assert result.exit_code == 2
+    assert "Нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID" in result.output
+    assert not updates.called
+    assert runs_of(cli_db, "labels") == []
