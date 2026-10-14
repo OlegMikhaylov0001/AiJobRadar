@@ -1,0 +1,8 @@
+{"type": "result", "subtype": "success", "is_error": false, "stop_reason": "tool_use",
+ "total_cost_usd": 0.1, "usage": {"input_tokens": 5000, "cache_creation_input_tokens": 100,
+ "cache_read_input_tokens": 0, "output_tokens": 400},
+ "structured_output": {"skills_match": 9, "domain_match": 2, "seniority_fit": 4, "target_fit": 3,
+ "geo_eligible": "yes", "employer_country_excluded": "no", "timezone_risk": "low",
+ "english_risk": "low", "preferred_language": "no", "comp_ok": "unknown",
+ "why_fit": "Node.js и интеграции.", "main_risk": "Нет ставки.", "gaps": "Нет Kafka."},
+ "result": "{}"}
