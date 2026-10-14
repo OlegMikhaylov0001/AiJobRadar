@@ -186,3 +186,96 @@ def test_any_exception_from_the_http_layer_is_reduced_to_its_class_name() -> Non
     assert str(info.value) == "sendMessage: RuntimeError"
     assert TOKEN not in repr(info.value) and info.value.__cause__ is None
     assert info.value.__suppress_context__ or info.value.__context__ is None
+
+
+# --- at-most-once: sendMessage is not idempotent ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ReadTimeout("t " + BASE),
+        httpx.WriteTimeout("t " + BASE),
+        httpx.RemoteProtocolError("p " + BASE),
+        httpx.ReadError("r " + BASE),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+@respx.mock
+def test_send_message_is_not_retried_after_the_request_may_have_arrived(exc: Exception) -> None:
+    # Telegram may already have posted the message: a retry would post it twice.
+    route = respx.post(f"{BASE}/sendMessage").mock(side_effect=exc)
+    sleeps: list[float] = []
+    with pytest.raises(TelegramError) as info:
+        _client(sleeps).send_message("42", "x")
+    assert route.call_count == 1 and sleeps == []
+    assert info.value.ambiguous is True
+    assert str(info.value) == f"sendMessage: {type(exc).__name__}"
+    assert TOKEN not in repr(info.value)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectError("c " + BASE),
+        httpx.ConnectTimeout("c " + BASE),
+        httpx.PoolTimeout("p " + BASE),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+@respx.mock
+def test_send_message_retries_errors_before_the_request_left(exc: Exception) -> None:
+    route = respx.post(f"{BASE}/sendMessage").mock(side_effect=exc)
+    sleeps: list[float] = []
+    with pytest.raises(TelegramError) as info:
+        _client(sleeps).send_message("42", "x")
+    assert route.call_count == 3 and len(sleeps) == 2
+    assert info.value.ambiguous is False
+
+
+@respx.mock
+def test_invalid_url_is_unambiguous() -> None:
+    respx.post(f"{BASE}/sendMessage").mock(side_effect=httpx.InvalidURL("bad " + BASE))
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert info.value.ambiguous is False
+
+
+@pytest.mark.parametrize("status", [400, 403, 502])
+@respx.mock
+def test_http_error_status_is_unambiguous(status: int) -> None:
+    respx.post(f"{BASE}/sendMessage").mock(return_value=httpx.Response(status, json={"ok": False}))
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert info.value.ambiguous is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [[1], {"ok": False}, {"ok": True, "result": {}}, {"ok": True, "result": None}],
+    ids=repr,
+)
+@respx.mock
+def test_http_200_with_a_bad_body_is_ambiguous_and_not_retried(body: object) -> None:
+    # Telegram answered 200: the message may well be in the chat.
+    route = respx.post(f"{BASE}/sendMessage").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert route.call_count == 1 and info.value.ambiguous is True
+
+
+@respx.mock
+def test_get_updates_still_retries_a_read_timeout() -> None:
+    route = respx.post(f"{BASE}/getUpdates").mock(
+        side_effect=[
+            httpx.ReadTimeout("t"),
+            httpx.Response(200, json={"ok": True, "result": []}),
+        ]
+    )
+    sleeps: list[float] = []
+    assert _client(sleeps).get_updates(0) == []
+    assert route.call_count == 2 and sleeps == [1.0]
+
+
+def test_telegram_error_is_unambiguous_by_default() -> None:
+    assert TelegramError("sendMessage: HTTP 400").ambiguous is False

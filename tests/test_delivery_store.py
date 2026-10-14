@@ -32,7 +32,7 @@ def test_delivery_is_unique_per_job(session: Session) -> None:
     first = store.create_delivery(
         session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
     )
-    assert first.id is not None
+    assert first.id is not None and first.state == "pending"  # sent only once Telegram confirms
     with pytest.raises(IntegrityError), session.begin_nested():
         store.create_delivery(
             session, job_id=job.id, run_id=run.id, slot="top", position=2, now=NOW

@@ -375,7 +375,9 @@ def create_delivery(
     position: int,
     now: datetime,
 ) -> Delivery:
-    delivery = Delivery(job_id=job_id, run_id=run_id, slot=slot, position=position, sent_at=now)
+    delivery = Delivery(
+        job_id=job_id, run_id=run_id, slot=slot, position=position, state="pending", sent_at=now
+    )
     session.add(delivery)
     session.flush()
     return delivery

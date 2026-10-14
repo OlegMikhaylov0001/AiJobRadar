@@ -14,8 +14,19 @@ _API = "https://api.telegram.org"
 _MAX_RETRY_AFTER = 60.0
 
 
+# Errors raised before the request left this process: Telegram cannot have acted on it.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.InvalidURL)
+# Repeating these could post a message twice: there is no idempotency key in the Bot API.
+_NOT_IDEMPOTENT = frozenset({"sendMessage"})
+
+
 class TelegramError(Exception):
-    pass
+    """`ambiguous`: Telegram may have acted on the request (the answer was lost or unreadable),
+    so the caller must not assume it failed."""
+
+    def __init__(self, message: str, *, ambiguous: bool = False) -> None:
+        super().__init__(message)
+        self.ambiguous = ambiguous
 
 
 def _json_object(response: httpx.Response) -> dict[str, Any]:
@@ -41,28 +52,36 @@ class TelegramClient:
     sleep: Callable[[float], None] = field(default=time.sleep)
     attempts: int = 3
 
-    def _post(self, method: str, payload: dict[str, Any]) -> tuple[httpx.Response | None, str]:
-        # The URL is built here, not in _call, so no frame above holds it as a local.
-        # Any exception may carry the request URL (and so the token): keep only the class name.
+    def _post(
+        self, method: str, payload: dict[str, Any]
+    ) -> tuple[httpx.Response | None, str, bool]:
+        """(response, error class name, whether the failed request may have reached Telegram).
+
+        The URL is built here, not in _call, so no frame above holds it as a local. Any exception
+        may carry the request URL (and so the token): keep only the class name."""
         url = f"{_API}/bot{self.token}/{method}"
         try:
-            return self.http.post(url, json=payload), ""
+            return self.http.post(url, json=payload), "", False
         except Exception as exc:
-            return None, type(exc).__name__
+            return None, type(exc).__name__, not isinstance(exc, _NOT_SENT)
 
     def _call(self, method: str, payload: dict[str, Any]) -> Any:
         for attempt in range(1, self.attempts + 1):
             wait = 2.0 ** (attempt - 1)
-            response, network_error = self._post(method, payload)
+            response, network_error, ambiguous = self._post(method, payload)
             # Raise outside any except block so __context__ does not chain the httpx error.
             if response is None:
-                if attempt == self.attempts:
-                    raise TelegramError(f"{method}: {network_error}") from None
+                if attempt == self.attempts or (ambiguous and method in _NOT_IDEMPOTENT):
+                    raise TelegramError(f"{method}: {network_error}", ambiguous=ambiguous) from None
                 self.sleep(wait)
                 continue
             body = _json_object(response)
             if response.status_code == 200 and body.get("ok"):
                 return body.get("result")
+            if response.status_code == 200:
+                # Telegram answered 200 but the body is not the expected one: it may have acted.
+                raise TelegramError(f"{method}: HTTP 200", ambiguous=True) from None
+            # Any other status: Telegram answered and did not act (5xx and 429 included).
             retryable = response.status_code == 429 or response.status_code >= 500
             if not retryable or attempt == self.attempts:
                 raise TelegramError(f"{method}: HTTP {response.status_code}") from None
@@ -85,7 +104,8 @@ class TelegramClient:
         result = self._call("sendMessage", payload)
         message_id = result.get("message_id") if isinstance(result, dict) else None
         if isinstance(message_id, bool) or not isinstance(message_id, int):
-            raise TelegramError("sendMessage: bad response") from None
+            # Accepted with HTTP 200, but no message id: the message may be in the chat.
+            raise TelegramError("sendMessage: bad response", ambiguous=True) from None
         return message_id
 
     def get_updates(self, offset: int) -> list[dict[str, Any]]:

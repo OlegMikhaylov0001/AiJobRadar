@@ -230,7 +230,9 @@ def test_score_command_with_failures_is_partial(
     monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(invalid_result()))
     result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
     assert result.exit_code == 0, result.output
-    assert "LLM: 0 ok · 1 invalid_output · первая ошибка: skills_match: x · ≈$0.05" in result.output
+    assert "⚠️ LLM: 0 ok · 1 invalid_output · первая ошибка: skills_match: x · ≈$0.05" in (
+        result.output
+    )
     (run,) = runs_of(cli_db, "score")
     assert run.status == "partial" and run.counts["llm_invalid_output"] == 1
     assert job_states(cli_db) == ["pending_score"]
@@ -289,7 +291,7 @@ def test_run_scores_after_fetch_and_failures_make_it_partial(
     result = CliRunner().invoke(app, write_run_files(tmp_path))
     assert result.exit_code == 0, result.output
     assert "Прогон: partial" in result.output
-    assert result.output.splitlines()[-1].startswith("LLM: 0 ok · 2 invalid_output")
+    assert result.output.splitlines()[-1].startswith("⚠️ LLM: 0 ok · 2 invalid_output")
     (run,) = runs_of(cli_db, "fetch")
     assert run.status == "partial"
     assert run.counts["new"] == 4 and run.counts["llm_invalid_output"] == 2
@@ -328,7 +330,7 @@ def test_run_keeps_fetch_results_when_scoring_crashes(
     assert "Оценка прервалась: RuntimeError" in result.output
     assert "Fictional Job Text" not in result.output
     assert "Прогон: partial" in result.output  # the fetch report is still printed
-    assert "LLM: оценка прервалась (RuntimeError)" in result.output
+    assert "⚠️ LLM: оценка прервалась (RuntimeError)" in result.output
     assert "LLM: 0 ok" not in result.output  # no scoring counters: scoring never finished
     (run,) = runs_of(cli_db, "fetch")
     assert run.status == "partial" and run.counts["new"] == 4

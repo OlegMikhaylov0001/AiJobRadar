@@ -284,8 +284,48 @@ def test_real_database_error_rolls_back_only_that_record(session: Session) -> No
     assert report.sources[0].ingest_errors == 1
     assert session.scalars(select(Job.company_raw)).all() == ["Company fine"]  # no orphan job row
     source_run = session.scalars(select(SourceRun)).one()
-    assert source_run.error is not None and "\n" not in source_run.error
-    assert "ingest: 1 not stored" in source_run.error
+    # Class and SQLSTATE only: the driver's message can quote the rejected value.
+    assert source_run.error == (
+        "ingest: 1 not stored; first: StringDataRightTruncation (SQLSTATE 22001)"
+    )
+
+
+class _DriverError(Exception):
+    sqlstate = "22P02"
+
+
+@pytest.mark.parametrize(
+    ("orig", "expected"),
+    [
+        (
+            _DriverError("invalid input syntax: 'Secret Company text'"),
+            "_DriverError (SQLSTATE 22P02)",
+        ),
+        (ValueError("Secret Company text"), "ValueError"),
+    ],
+    ids=["with-sqlstate", "without-sqlstate"],
+)
+def test_ingest_driver_error_is_named_by_class_and_sqlstate_only(
+    session: Session, monkeypatch: pytest.MonkeyPatch, orig: Exception, expected: str
+) -> None:
+    from sqlalchemy.exc import DataError
+
+    import aijobradar.pipeline as pipeline
+
+    def reject(*args: Any, **kwargs: Any) -> DedupOutcome:
+        raise DataError("INSERT INTO jobs VALUES (%(x)s)", {"x": "Secret Company text"}, orig)
+
+    monkeypatch.setattr(pipeline, "ingest", reject)
+    with httpx.Client() as client:
+        report = run_fetch(
+            session,
+            [_OneRecordAdapter(records=("fine",))],
+            client,
+            now=NOW,
+            dedup_cfg=DedupConfig(),
+        )
+    assert report.sources[0].error == f"ingest: 1 not stored; first: {expected}"
+    assert "Secret Company" not in format_report(report)
 
 
 def test_run_where_no_record_was_stored_is_failed_and_committed_as_such(session: Session) -> None:
@@ -465,7 +505,8 @@ def test_format_report_llm_line() -> None:
         scoring=ScoringReport(ok=26, invalid_output=1, skipped_budget=1, est_cost_usd=0.414),
     )
     assert format_report(report).splitlines()[-1] == (
-        "LLM: 26 ok · 1 invalid_output · 1 skipped_budget · ≈$0.41 (оценка по API-ценам)"
+        # Failures mark the line like a degraded source: they made the run partial.
+        "⚠️ LLM: 26 ok · 1 invalid_output · 1 skipped_budget · ≈$0.41 (оценка по API-ценам)"
     )
 
 
@@ -477,7 +518,7 @@ def test_format_report_names_a_scoring_crash_by_class() -> None:
         outcomes={},
         scoring_error="RuntimeError",
     )
-    assert format_report(report).splitlines()[-1] == "LLM: оценка прервалась (RuntimeError)"
+    assert format_report(report).splitlines()[-1] == "⚠️ LLM: оценка прервалась (RuntimeError)"
     assert "оценка прервалась" not in format_report(dataclasses.replace(report, scoring_error=None))
 
 
@@ -508,7 +549,7 @@ def test_format_report_llm_line_shows_first_error_before_cost() -> None:
         ),
     )
     assert format_report(report).splitlines()[-1] == (
-        "LLM: 3 ok · 2 invalid_output · первая ошибка: error_max_structured_output_retries"
+        "⚠️ LLM: 3 ok · 2 invalid_output · первая ошибка: error_max_structured_output_retries"
         " · ≈$0.60 (оценка по API-ценам)"
     )
 
@@ -541,6 +582,15 @@ def test_update_run_result_merges_counts(session: Session) -> None:
         (DeliveryReport(top=3, explore=2), "Выдача: 3 выше порога + 2 🎲"),
         (DeliveryReport(top=0, explore=2), "Выдача: подходящих нет + 2 🎲"),
         (DeliveryReport(), "Выдача: подходящих нет"),
+        (
+            DeliveryReport(top=2, unknown=1, interrupted=True),
+            "Выдача прервана: отправлено 2 выше порога · 1 не подтверждено",
+        ),
+        (DeliveryReport(interrupted=True), "Выдача прервана: отправлено 0 выше порога"),
+        (
+            DeliveryReport(top=5, explore=1, interrupted=True),
+            "Выдача прервана: отправлено 5 выше порога + 1 🎲",
+        ),
     ],
 )
 def test_delivery_line(report: DeliveryReport, line: str) -> None:

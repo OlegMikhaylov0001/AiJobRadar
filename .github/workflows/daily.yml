@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  actions: write   # keepalive: re-enable the scheduled workflows
 
 concurrency:
   group: daily
@@ -46,10 +45,3 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           LIMIT: ${{ inputs.limit }}
         run: uv run aijobradar run --deliver --migrate ${LIMIT:+--limit "$LIMIT"}
-      - name: Keepalive (scheduled workflows stop after 60 days without repo activity)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow enable daily.yml --repo "$GITHUB_REPOSITORY"
-          gh workflow enable labels.yml --repo "$GITHUB_REPOSITORY"

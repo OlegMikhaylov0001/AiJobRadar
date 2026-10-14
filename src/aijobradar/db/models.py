@@ -181,6 +181,9 @@ class Delivery(Base):
     slot: Mapped[str] = mapped_column(String(8))  # top | explore
     position: Mapped[int] = mapped_column(Integer)
     tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # pending: committed before the send · sent: Telegram confirmed · unknown: the send may or
+    # may not have arrived. Every state excludes the job from later digests (at most once).
+    state: Mapped[str] = mapped_column(String(8))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

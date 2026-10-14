@@ -1,29 +1,37 @@
+import random
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from aijobradar import store
+from aijobradar.config import load_scoring_config
 from aijobradar.db.models import Delivery, LlmScore
 from aijobradar.models import RawJob
 from aijobradar.normalize import normalize
-from aijobradar.select import Pick
+from aijobradar.select import Pick, select_digest
 from aijobradar.telegram.client import TelegramError
-from aijobradar.telegram.deliver import deliver_digest, send_crash
+from aijobradar.telegram.deliver import DeliveryReport, deliver_digest, send_crash
+from tests.cli_support import cli_db_fixture  # noqa: F401  (registers the `cli_db` fixture)
 
 NOW = datetime(2026, 10, 14, 6, tzinfo=UTC)
+CFG = load_scoring_config(Path(__file__).parent.parent / "config" / "scoring.yaml").model_copy(
+    update={"threshold": 0.0, "top_n": 10, "explore_n": 0, "max_age_days": 14}
+)
 
 
 class FakeTelegram:
-    def __init__(self, fail_on: int | None = None) -> None:
+    def __init__(self, fail_on: int | None = None, error: Exception | None = None) -> None:
         self.sent: list[tuple[str, Any]] = []
         self.fail_on = fail_on
+        self.error = error or TelegramError("sendMessage: HTTP 500")
 
     def send_message(self, chat_id: str, text: str, reply_markup: Any = None) -> int:
         if self.fail_on is not None and len(self.sent) + 1 == self.fail_on:
-            raise TelegramError("sendMessage: HTTP 500")
+            raise self.error
         self.sent.append((text, reply_markup))
         return 1000 + len(self.sent)
 
@@ -101,8 +109,8 @@ def test_failure_mid_digest_keeps_sent_jobs_and_drops_the_unsent(session: Sessio
             report_text="x",
             now=NOW,
         )
-    delivered = {d.job_id for d in session.scalars(select(Delivery))}
-    assert delivered == {picks[0].job.id}
+    delivered = {d.job_id: d.state for d in session.scalars(select(Delivery))}
+    assert delivered == {picks[0].job.id: "sent"}
 
 
 def test_nothing_today_still_sends_header_and_footer(session: Session) -> None:
@@ -125,3 +133,85 @@ def test_crash_message_needs_no_database() -> None:
     tg = FakeTelegram()
     send_crash(tg, chat_id="42", reason="БД недоступна", report_text=None)  # type: ignore[arg-type]
     assert "БД недоступна" in tg.sent[0][0]
+
+
+def _deliver(session: Session, tg: Any, picks: list[Pick], report: DeliveryReport | None) -> Any:
+    return deliver_digest(
+        session,
+        tg,
+        chat_id="42",
+        run_id=picks[0].job.first_seen_run_id,
+        picks=picks,
+        report_text="x",
+        now=NOW,
+        report=report,
+    )
+
+
+def _selectable(session: Session) -> set[Any]:
+    picks = select_digest(session, cfg=CFG, now=NOW, rng=random.Random(1))
+    return {p.job.id for p in picks}
+
+
+def test_a_refused_send_deletes_its_row_and_the_job_is_offered_again(session: Session) -> None:
+    _, picks = _picks(session, 3)
+    tg = FakeTelegram(fail_on=3, error=TelegramError("sendMessage: HTTP 400"))
+    report = DeliveryReport()
+    with pytest.raises(TelegramError):
+        _deliver(session, tg, picks, report)
+    states = {d.job_id: d.state for d in session.scalars(select(Delivery))}
+    assert states == {picks[0].job.id: "sent"}
+    assert (report.top, report.explore, report.unknown) == (1, 0, 0)  # counts survive the failure
+    assert _selectable(session) == {picks[1].job.id, picks[2].job.id}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TelegramError("sendMessage: ReadTimeout", ambiguous=True), RuntimeError("secret")],
+    ids=["ambiguous-telegram-error", "unexpected-error"],
+)
+def test_an_ambiguous_send_is_kept_as_unknown_and_never_offered_again(
+    session: Session, error: Exception
+) -> None:
+    _, picks = _picks(session, 3)
+    tg = FakeTelegram(fail_on=3, error=error)  # header ok, job 1 ok, job 2 may have arrived
+    report = DeliveryReport()
+    with pytest.raises(type(error)):
+        _deliver(session, tg, picks, report)
+    states = {d.job_id: d.state for d in session.scalars(select(Delivery))}
+    assert states == {picks[0].job.id: "sent", picks[1].job.id: "unknown"}
+    assert len(tg.sent) == 2  # nothing is sent after it, and it is not sent again
+    assert (report.top, report.unknown) == (1, 1)
+    assert _selectable(session) == {picks[2].job.id}
+
+
+def test_without_a_report_argument_one_is_returned(session: Session) -> None:
+    _, picks = _picks(session, 1)
+    assert _deliver(session, FakeTelegram(), picks, None).top == 1
+
+
+class WatchingTelegram(FakeTelegram):
+    """Looks at the deliveries table from its own connection while each job is being sent."""
+
+    def __init__(self, engine: Engine) -> None:
+        super().__init__()
+        self.engine = engine
+        self.committed: list[list[tuple[int, str]]] = []
+
+    def send_message(self, chat_id: str, text: str, reply_markup: Any = None) -> int:
+        if reply_markup is not None:
+            with Session(self.engine) as other:
+                rows = other.scalars(select(Delivery).order_by(Delivery.position))
+                self.committed.append([(d.position, d.state) for d in rows])
+        return super().send_message(chat_id, text, reply_markup)
+
+
+def test_each_delivery_row_is_committed_as_pending_before_its_send(cli_db: Engine) -> None:
+    with Session(cli_db, expire_on_commit=False) as session:
+        _, picks = _picks(session, 2)
+        tg = WatchingTelegram(cli_db)
+        _deliver(session, tg, picks, None)
+    # A crash during a send leaves a committed row behind: the job is never sent twice.
+    assert tg.committed == [[(1, "pending")], [(1, "sent"), (2, "pending")]]
+    with Session(cli_db) as other:
+        assert [d.state for d in other.scalars(select(Delivery))] == ["sent", "sent"]

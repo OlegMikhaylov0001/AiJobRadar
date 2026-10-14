@@ -27,9 +27,16 @@ class FeedRequest:
 
 
 class FeedsFailed(Exception):
+    """Every feed of a source failed. The message joins `describe_error` texts only."""
+
     def __init__(self, message: str, http_status: int | None) -> None:
         super().__init__(message)
         self.http_status = http_status
+
+
+class SourceFormatError(ValueError):
+    """A response or record of an unexpected shape. Raised by our own code with a fixed
+    message (field names, page numbers, never a value from the source), so it may be shown."""
 
 
 class Adapter(Protocol):
@@ -41,11 +48,15 @@ class Adapter(Protocol):
 
 
 def describe_error(exc: BaseException) -> tuple[str, int | None]:
+    """Public-log text of a fetch error. Fail-closed: any message that is not one of our own
+    fixed texts can quote the source's response, so only its class name is kept."""
     if isinstance(exc, FeedsFailed):
         return str(exc), exc.http_status
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code}", exc.response.status_code
-    return f"{type(exc).__name__}: {exc}"[:500], None
+    if isinstance(exc, SourceFormatError):
+        return _one_line(f"{type(exc).__name__}: {exc}")[:500], None
+    return type(exc).__name__, None
 
 
 def describe_record_error(exc: BaseException) -> str:
@@ -55,9 +66,15 @@ def describe_record_error(exc: BaseException) -> str:
             f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in exc.errors(include_input=False)
         )
         text = f"{type(exc).__name__}: {fields}"
-    else:
+    elif isinstance(exc, SourceFormatError):
         text = f"{type(exc).__name__}: {exc}"
-    return re.sub(r"\s*\n\s*", " ", text)[:300]
+    else:
+        text = type(exc).__name__
+    return _one_line(text)[:300]
+
+
+def _one_line(text: str) -> str:
+    return re.sub(r"\s*\n\s*", " ", text)
 
 
 def fetch_feeds(

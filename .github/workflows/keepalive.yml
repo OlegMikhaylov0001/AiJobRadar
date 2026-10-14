@@ -1,0 +1,38 @@
+name: keepalive
+
+# GitHub disables scheduled workflows after 60 days without activity on the default branch, and
+# re-enabling a workflow is not activity. On a quiet repository this pushes an empty commit at
+# most about once every 50 days; otherwise it does nothing.
+on:
+  schedule:
+    - cron: "30 5 * * 1"   # Mondays 05:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the empty commit
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # persist-credentials stays at its default (true): the push below needs the token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Empty commit after 50 quiet days
+        run: |
+          last=$(git log -1 --format=%ct)
+          age_days=$(( ($(date +%s) - last) / 86400 ))
+          if [ "$age_days" -ge 50 ]; then
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit --allow-empty -m "chore: keepalive (no repository activity for 50 days)"
+            git push
+          else
+            echo "Активность есть, keepalive не нужен."
+          fi

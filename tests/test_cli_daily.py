@@ -17,6 +17,7 @@ import httpx
 import pytest
 import respx
 from sqlalchemy import Engine, event, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner, Result
 
@@ -451,10 +452,10 @@ def test_daily_scoring_crash_is_named_in_the_footer_by_class(
 
     assert result.exit_code == 0, result.output
     footer = _texts(telegram)[-1]
-    assert "LLM: оценка прервалась (RuntimeError)" in footer
+    assert "⚠️ LLM: оценка прервалась (RuntimeError)" in footer
     assert "Прогон: partial" in footer
-    assert "LLM: оценка прервалась (RuntimeError)" in result.output
-    assert "LLM: оценка прервалась (RuntimeError)" in daily_env.read_text()
+    assert "⚠️ LLM: оценка прервалась (RuntimeError)" in result.output
+    assert "⚠️ LLM: оценка прервалась (RuntimeError)" in daily_env.read_text()
     assert "secret job text" not in footer and "secret job text" not in result.output
 
 
@@ -480,9 +481,15 @@ def test_daily_telegram_rejects_exits_1_and_marks_run_failed(
     assert _deliveries(cli_db) == []
     (run,) = runs_of(cli_db, "fetch")
     assert run.status == "failed"
-    assert "delivered_top" not in run.counts
+    # Nothing went out: the counts say so instead of being left out.
+    assert (
+        run.counts["delivered_top"],
+        run.counts["delivered_explore"],
+        run.counts["delivered_unknown"],
+    ) == (0, 0, 0)
     assert "SECRET JOB TEXT" not in result.output  # Telegram's own description is never echoed
     assert "Прогон: failed" in daily_env.read_text()
+    assert "Выдача прервана: отправлено 0 выше порога" in result.output
     _assert_no_leaks(result.output, daily_env.read_text())
 
 
@@ -852,3 +859,245 @@ def test_db_upgrade_database_down_exits_1_without_traceback(
     assert result.exit_code == 1
     assert "БД недоступна." in result.stderr
     assert "Traceback" not in result.output and "localhost" not in result.output
+
+
+# --- at-most-once delivery: partial counts and unconfirmed sends ---------------------------------
+
+
+def _telegram_script(router: respx.MockRouter, script: list[str]) -> respx.Route:
+    """One reply per sendMessage call: "ok", "400" or "timeout"; "ok" once the script ends."""
+    ids = itertools.count(1)
+    steps = iter(script)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        step = next(steps, "ok")
+        if step == "timeout":
+            raise httpx.ReadTimeout("read timed out", request=request)
+        if step == "400":
+            return httpx.Response(400, json={"ok": False, "description": "SECRET JOB TEXT"})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": next(ids)}})
+
+    return router.post(SEND).mock(side_effect=reply)
+
+
+def test_daily_refusal_mid_digest_keeps_the_count_of_jobs_already_sent(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 2)
+    mock_fetch(respx_mock)
+    telegram = _telegram_script(respx_mock, ["ok", "ok", "400"])  # header, job 1, job 2 refused
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1
+    assert len(telegram.calls) == 3
+    assert [d.state for d in _deliveries(cli_db)] == ["sent"]  # the refused job's row is gone
+    (run,) = runs_of(cli_db, "fetch")
+    assert run.status == "failed"
+    assert (run.counts["delivered_top"], run.counts["delivered_unknown"]) == (1, 0)
+    assert "Выдача прервана: отправлено 1 выше порога" in result.output
+    assert "Выдача прервана: отправлено 1 выше порога" in daily_env.read_text()
+    _assert_no_leaks(result.output, daily_env.read_text())
+
+
+def test_daily_read_timeout_on_a_job_is_unconfirmed_and_never_sent_again(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    seed_fresh_pending(cli_db, 2)
+    mock_fetch(respx_mock)
+    telegram = _telegram_script(respx_mock, ["ok", "timeout"])  # header, job 1 times out
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+
+    first = _invoke(tmp_path, scoring_path)
+
+    assert first.exit_code == 1
+    assert len(telegram.calls) == 2  # the timed-out send is not retried: it may have arrived
+    lost_text = _texts(telegram)[1]
+    assert "Telegram не принял: sendMessage: ReadTimeout" in first.stderr
+    assert [d.state for d in _deliveries(cli_db)] == ["unknown"]
+    (run,) = runs_of(cli_db, "fetch")
+    assert run.status == "failed" and run.counts["delivered_unknown"] == 1
+    assert "Выдача прервана: отправлено 0 выше порога · 1 не подтверждено" in first.output
+
+    second = _invoke(tmp_path, scoring_path, "--no-score")
+
+    assert second.exit_code == 0, second.output
+    later = _texts(telegram)[2:]
+    assert len(later) == 3  # header + the other job + footer
+    assert lost_text not in later
+    assert sorted(d.state for d in _deliveries(cli_db)) == ["sent", "unknown"]
+
+
+# --- a late database failure follows the matrix, not a traceback --------------------------------
+
+SECRET_HOST = "ep-secret.neon.tech"
+
+
+def _db_gone(*args: Any, **kwargs: Any) -> Any:
+    raise OperationalError(
+        "SELECT 1", {}, Exception(f'connection to server at "{SECRET_HOST}" failed')
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["aijobradar.pipeline.run_fetch", "aijobradar.store.latest_profile_version"],
+)
+def test_daily_late_database_failure_sends_crash_and_exits_1_without_leaking(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+    target: str,
+) -> None:
+    seed(cli_db)
+    mock_fetch(respx_mock)
+    telegram = _telegram_ok(respx_mock)
+    monkeypatch.setattr("aijobradar.cli._make_scorer", FakeScorer(ok_result()))
+    monkeypatch.setattr(target, _db_gone)
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # handled, not an escaped traceback
+    assert "Прогон прервался: OperationalError" in result.stderr
+    (text,) = _texts(telegram)
+    assert "прогон не удался" in text and "Прогон прервался: OperationalError" in text
+    summary = daily_env.read_text() if daily_env.exists() else ""
+    for shown in (result.output, text, summary):
+        assert SECRET_HOST not in shown and "Traceback" not in shown
+    _assert_no_leaks(result.output, text)
+
+
+def test_daily_late_database_failure_after_the_fetch_keeps_the_report(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    seed(cli_db)
+    mock_fetch(respx_mock)
+    telegram = _telegram_ok(respx_mock)
+    monkeypatch.setattr("aijobradar.cli._score_after_fetch", _db_gone)
+
+    result = _invoke(tmp_path, scoring_path)
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    (text,) = _texts(telegram)
+    # The report that already existed goes out, marked failed like the exit code.
+    assert "Прогон прервался: OperationalError" in text and "Прогон: failed" in text
+    assert "Прогон прервался: OperationalError" in result.stderr
+    assert "Прогон: failed" in daily_env.read_text() and "Прогон: failed" in result.output
+    assert SECRET_HOST not in result.output + text + daily_env.read_text()
+
+
+def test_run_without_deliver_late_database_failure_exits_1_without_leaking(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    mock_fetch(respx_mock)
+    monkeypatch.setattr("aijobradar.pipeline.run_fetch", _db_gone)
+
+    result = CliRunner().invoke(app, [*write_run_files(tmp_path, scoring_path), "--no-score"])
+
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert "Прогон прервался: OperationalError" in result.stderr
+    assert SECRET_HOST not in result.output
+
+
+def test_score_database_failure_exits_1_without_leaking(
+    cli_db: Engine, monkeypatch: pytest.MonkeyPatch, daily_env: Path
+) -> None:
+    seed(cli_db)
+    monkeypatch.setattr("aijobradar.store.start_run", _db_gone)
+
+    result = CliRunner().invoke(app, ["score", "--scoring", str(SCORING)])
+
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert "Оценка прервалась: OperationalError" in result.stderr
+    assert SECRET_HOST not in result.output
+
+
+@pytest.mark.parametrize("target", ["aijobradar.store.start_run", "aijobradar.store.finish_run"])
+def test_labels_poll_database_failure_exits_1_without_leaking(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    daily_env: Path,
+    target: str,
+) -> None:
+    respx_mock.post(GET_UPDATES).mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": []})
+    )
+    monkeypatch.setattr(target, _db_gone)
+
+    result = CliRunner().invoke(app, ["labels-poll"])
+
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert "Метки прервались: OperationalError" in result.stderr
+    assert SECRET_HOST not in result.output
+
+
+# --- public report: no third-party text through exception messages -----------------------------
+
+
+def test_parser_error_text_never_reaches_the_public_report(
+    respx_mock: respx.MockRouter,
+    cli_db: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    daily_env: Path,
+    scoring_path: Path,
+) -> None:
+    mock_fetch(respx_mock)
+
+    def leaky(self: Any, item: Any) -> Any:
+        raise ValueError("could not convert string to float: 'Secret Company text'")
+
+    monkeypatch.setattr("aijobradar.sources.wwr.WwrAdapter.parse_record", leaky)
+
+    result = CliRunner().invoke(app, [*write_run_files(tmp_path, scoring_path), "--no-score"])
+
+    assert result.exit_code == 0, result.output
+    summary = daily_env.read_text()
+    assert "wwr: ❌ failed" in result.output and "first: ValueError" in result.output
+    assert "first: ValueError" in summary
+    assert "Secret Company" not in result.output and "Secret Company" not in summary
+
+
+def test_db_upgrade_other_failure_is_named_by_class_only(
+    daily_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(url: str) -> None:
+        raise RuntimeError(f"DDL failed on {url} at {SECRET_HOST}")
+
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setattr("aijobradar.db.migrate.upgrade", boom)
+
+    result = CliRunner().invoke(app, ["db", "upgrade"])
+
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert "Миграция БД не удалась: RuntimeError" in result.stderr
+    assert SECRET_HOST not in result.output and TEST_DATABASE_URL not in result.output

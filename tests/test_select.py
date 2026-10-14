@@ -2,6 +2,7 @@ import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy.orm import Session
 
 from aijobradar import store
@@ -79,4 +80,17 @@ def test_nothing_above_threshold_still_explores(session: Session) -> None:
 def test_unscored_and_failed_jobs_are_ignored(session: Session) -> None:
     job = _scored(session, 1, 95)
     store.set_job_state(session, job, "score_failed")
+    assert select_digest(session, cfg=CFG, now=NOW, rng=random.Random(1)) == []
+
+
+@pytest.mark.parametrize("state", ["pending", "sent", "unknown"])
+def test_a_delivery_in_any_state_excludes_the_job(session: Session, state: str) -> None:
+    # pending/unknown: Telegram may have posted it; at most once beats a duplicate.
+    job = _scored(session, 1, 95)
+    run = store.start_run(session, "daily", NOW)
+    delivery = store.create_delivery(
+        session, job_id=job.id, run_id=run.id, slot="top", position=1, now=NOW
+    )
+    delivery.state = state
+    session.flush()
     assert select_digest(session, cfg=CFG, now=NOW, rng=random.Random(1)) == []

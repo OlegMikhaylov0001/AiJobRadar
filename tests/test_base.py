@@ -7,8 +7,17 @@ import pytest
 import respx
 
 from aijobradar.models import RawJob, SalaryPeriod, SourceStatus
-from aijobradar.sources.base import FeedRequest, FeedsFailed, Fetched, fetch_feeds, run_adapter
+from aijobradar.sources.base import (
+    FeedRequest,
+    FeedsFailed,
+    Fetched,
+    SourceFormatError,
+    fetch_feeds,
+    run_adapter,
+)
 from aijobradar.sources.common import parse_iso_utc, parse_rfc822_utc, parse_salary_period
+
+LEAK = "Secret Company text"
 
 
 def _job(i: int) -> RawJob:
@@ -50,6 +59,10 @@ class FakeAdapter:
             )
         if record == "multiline":
             raise ValueError("first line\nsecond line")
+        if record == "leaky":
+            raise ValueError(f"could not convert string to float: '{LEAK}'")
+        if record == "own":
+            raise SourceFormatError("record lacks a parentCategories list")
         return _job(int(record))
 
 
@@ -68,7 +81,8 @@ def test_degraded_when_invalid_share_above_threshold() -> None:
     result = _run(FakeAdapter(records=["1", "bad", "bad"]))
     assert result.status is SourceStatus.DEGRADED
     assert result.error is not None and "2/3 invalid" in result.error
-    assert "broken record" in result.error
+    # The parser's own message may quote third-party input: only the class name is public.
+    assert "ValueError" in result.error and "broken record" not in result.error
 
 
 def test_validation_error_is_summarized_without_input_values() -> None:
@@ -82,13 +96,13 @@ def test_validation_error_is_summarized_without_input_values() -> None:
 def test_invalid_record_error_is_one_line() -> None:
     result = _run(FakeAdapter(records=["1", "multiline", "multiline"]))
     assert result.error is not None and "\n" not in result.error
-    assert "first line second line" in result.error
+    assert "first line" not in result.error and "ValueError" in result.error
 
 
 def test_failed_when_every_record_is_invalid() -> None:
     result = _run(FakeAdapter(records=["bad", "bad"]))
     assert result.status is SourceStatus.FAILED
-    assert result.error == "all 2 records invalid; first: ValueError: broken record"
+    assert result.error == "all 2 records invalid; first: ValueError"
 
 
 def test_failed_when_partial_fetch_left_only_invalid_records() -> None:
@@ -123,7 +137,7 @@ def test_fetch_exception_is_failed_never_raised() -> None:
 
 def test_unexpected_exception_is_failed() -> None:
     result = _run(FakeAdapter(raise_exc=RuntimeError("kaboom")))
-    assert result.status is SourceStatus.FAILED and result.error == "RuntimeError: kaboom"
+    assert result.status is SourceStatus.FAILED and result.error == "RuntimeError"
 
 
 @respx.mock
@@ -169,3 +183,46 @@ def test_date_and_period_helpers() -> None:
     assert parse_salary_period("yearly") is SalaryPeriod.YEAR
     assert parse_salary_period("Hourly") is SalaryPeriod.HOUR
     assert parse_salary_period("fortnightly") is None
+
+
+def test_third_party_text_in_a_parser_error_is_reduced_to_the_class_name() -> None:
+    result = _run(FakeAdapter(records=["leaky", "leaky"]))
+    assert result.status is SourceStatus.FAILED
+    assert result.error == "all 2 records invalid; first: ValueError"
+
+
+def test_own_record_format_error_keeps_its_fixed_text() -> None:
+    result = _run(FakeAdapter(records=["own"]))
+    assert result.error == (
+        "all 1 records invalid; first: SourceFormatError: record lacks a parentCategories list"
+    )
+
+
+@pytest.mark.parametrize(
+    "exc", [ValueError(LEAK), KeyError(LEAK), RuntimeError(f"{LEAK}\nline 2")], ids=repr
+)
+def test_fetch_error_text_is_reduced_to_the_class_name(exc: Exception) -> None:
+    result = _run(FakeAdapter(raise_exc=exc))
+    assert result.status is SourceStatus.FAILED
+    assert result.error == type(exc).__name__
+
+
+def test_own_fetch_format_error_keeps_its_fixed_text() -> None:
+    result = _run(FakeAdapter(raise_exc=SourceFormatError("unexpected response: no 'jobs' list")))
+    assert result.error == "SourceFormatError: unexpected response: no 'jobs' list"
+
+
+@respx.mock
+def test_feeds_failed_message_carries_no_third_party_text() -> None:
+    respx.get("https://a/1").mock(return_value=httpx.Response(200, json={}))
+    respx.get("https://a/2").mock(return_value=httpx.Response(502))
+
+    def extract(response: httpx.Response) -> list[Any]:
+        raise ValueError(LEAK)
+
+    reqs = [FeedRequest("one", "https://a/1"), FeedRequest("two", "https://a/2")]
+    with httpx.Client() as client, pytest.raises(FeedsFailed) as info:
+        fetch_feeds(client, reqs, extract=extract, key=str)
+    assert str(info.value) == "one: ValueError; two: HTTP 502"
+    result = _run(FakeAdapter(raise_exc=info.value))
+    assert (result.error, result.http_status) == ("one: ValueError; two: HTTP 502", 502)

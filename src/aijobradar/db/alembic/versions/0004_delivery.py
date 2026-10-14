@@ -45,6 +45,7 @@ def upgrade() -> None:
         sa.Column("slot", sa.String(8), nullable=False),
         sa.Column("position", sa.Integer(), nullable=False),
         sa.Column("tg_message_id", sa.BigInteger(), nullable=True),
+        sa.Column("state", sa.String(8), nullable=False),  # pending | sent | unknown
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("job_id", name="uq_deliveries_job"),
     )
