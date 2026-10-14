@@ -99,3 +99,23 @@ class RulesConfig(BaseModel):
 
 def load_rules_config(path: Path) -> RulesConfig:
     return RulesConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+class ScoringConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    timeout_s: float = Field(gt=0)
+    parallelism: int = Field(ge=1)
+    max_items_per_run: int = Field(ge=1)
+    max_est_cost_usd_per_run: float = Field(gt=0)
+    max_attempts: int = Field(ge=1)
+    max_description_chars: int = Field(ge=1000)
+    weights: dict[str, float]
+    penalties: dict[str, float]
+    bonuses: dict[str, float]
+
+
+def load_scoring_config(path: Path) -> ScoringConfig:
+    return ScoringConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
