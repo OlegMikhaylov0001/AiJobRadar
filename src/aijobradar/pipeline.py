@@ -154,6 +154,7 @@ def scoring_counts(scoring: ScoringReport) -> dict[str, float | int]:
         "llm_refused": scoring.refused,
         "llm_error": scoring.error,
         "llm_skipped_budget": scoring.skipped_budget,
+        "llm_skipped_db_error": scoring.skipped_db_error,
         "llm_parked": scoring.parked,
         "llm_est_cost_usd": scoring.est_cost_usd,
     }
@@ -174,6 +175,7 @@ def format_scoring_line(s: ScoringReport) -> str:
         (s.refused, "refused"),
         (s.error, "error"),
         (s.skipped_budget, "skipped_budget"),
+        (s.skipped_db_error, "не отправлено: БД не принимает результаты"),
         (s.parked, "отложено после попыток"),
     ):
         if count:

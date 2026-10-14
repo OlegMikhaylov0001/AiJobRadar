@@ -432,6 +432,7 @@ def test_scoring_counts_keys() -> None:
         "llm_refused",
         "llm_error",
         "llm_skipped_budget",
+        "llm_skipped_db_error",
         "llm_parked",
         "llm_est_cost_usd",
     }

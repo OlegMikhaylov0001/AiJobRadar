@@ -5,7 +5,7 @@ prompt_version: score-v1          # config/prompts/<prompt_version>.md; bump on 
 timeout_s: 120
 parallelism: 3
 max_items_per_run: 80
-max_est_cost_usd_per_run: 3.0     # estimate in API prices (total_cost_usd), not a charge
+max_est_cost_usd_per_run: 3.0     # soft cap, checked before each wave (one wave may pass it); estimate in API prices, not a charge
 max_attempts: 2                   # failed attempts per job before it is parked as score_failed
 max_description_chars: 12000
 

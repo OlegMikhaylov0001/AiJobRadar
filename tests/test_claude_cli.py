@@ -190,11 +190,14 @@ def test_non_finite_numbers_count_as_zero() -> None:
     assert (result.output_tokens, result.est_cost_usd) == (0, 0.0)
 
 
-def test_long_subtype_is_cut() -> None:
+@pytest.mark.parametrize(
+    "code", ["x" * 500, "Ошибка: job text leaked", "has spaces", "API Error: 400 boom", ""]
+)
+def test_unexpected_cli_codes_are_not_stored(code: str) -> None:
     envelope = json.loads(_envelope("error.json"))
-    envelope["subtype"] = "x" * 500
+    envelope["subtype"] = code
     runner, _ = _runner(json.dumps(envelope))
-    assert _score(runner).error == "x" * 100
+    assert _score(runner).error in ("unknown_error", "is_error")
 
 
 def test_api_error_reports_reason_and_status_not_text() -> None:

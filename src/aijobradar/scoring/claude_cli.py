@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from aijobradar.scoring.schema import ScoreAxes, score_json_schema
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _MAX_RAW = 50_000
 _MAX_ERROR = 300
+_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # The CLI (>= 2.1.267) validates --json-schema itself and retries internally; these identifiers
 # mean it gave up. We must not retry again: that would pay for the same failure twice.
 _STRUCTURED_SUBTYPE = "error_max_structured_output_retries"
@@ -78,7 +80,9 @@ def _fields(exc: ValidationError) -> str:
 def _cli_error(envelope: dict[str, Any]) -> str:
     # CLI-made identifiers only (never `result`, which may echo our input). On API errors the
     # CLI reports subtype "success"; terminal_reason and the HTTP status say what happened.
-    reason = str(envelope.get("terminal_reason") or envelope.get("subtype") or "is_error")[:100]
+    reason = str(envelope.get("terminal_reason") or envelope.get("subtype") or "is_error")
+    if not _IDENTIFIER.fullmatch(reason):
+        reason = "unknown_error"  # fail closed: only identifier-shaped codes are stored
     status = envelope.get("api_error_status")
     return f"{reason} {status}" if isinstance(status, int) else reason
 

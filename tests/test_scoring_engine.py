@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from aijobradar import store
@@ -104,19 +105,19 @@ def test_cached_score_is_reused_without_a_call(session: Session) -> None:
     assert session.scalars(select(Job)).one().state == "scored"
 
 
-def test_failure_keeps_pending_then_parks_after_max_attempts(session: Session) -> None:
+def test_failure_keeps_pending_then_parks_on_the_last_attempt(session: Session) -> None:
     run_id, profile, _ = _setup(session, 1)
-    for _ in range(CFG.max_attempts):
+    for attempt in range(1, CFG.max_attempts + 1):
         report = score_pending(
             session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_fail()), now=NOW
         )
-        assert report.invalid_output == 1
-    assert session.scalars(select(Job)).one().state == "pending_score"
-    report = score_pending(
-        session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(_fail()), now=NOW
-    )
-    assert (report.parked, report.invalid_output) == (1, 0)
-    assert session.scalars(select(Job)).one().state == "score_failed"
+        last = attempt == CFG.max_attempts
+        assert (report.invalid_output, report.parked) == (1, int(last))
+        expected = "score_failed" if last else "pending_score"
+        assert session.scalars(select(Job)).one().state == expected
+    scorer = _scorer(_fail())
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
+    assert scorer.calls == []
 
 
 def test_item_limit_skips_the_rest(session: Session) -> None:
@@ -200,31 +201,58 @@ def test_budget_goes_to_the_newest_postings(session: Session) -> None:
     }
 
 
-def test_db_error_on_one_job_does_not_break_the_next(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_id, profile, _ = _setup(session, 2)
-    cfg = CFG.model_copy(update={"parallelism": 1})
+def _flaky_writes(monkeypatch: pytest.MonkeyPatch, fail_on: set[int], exc: Exception) -> None:
     real = store.record_llm_score
     calls = {"n": 0}
 
     def flaky(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("db went away: private details")
+        if calls["n"] in fail_on:
+            raise exc
         real(*args, **kwargs)
 
     monkeypatch.setattr(store, "record_llm_score", flaky)
 
-    report = score_pending(
-        session, run_id=run_id, profile=profile, cfg=cfg, scorer=_scorer(_ok()), now=NOW
-    )
 
-    assert (report.ok, report.error, report.first_error) == (1, 1, "RuntimeError")
-    assert report.est_cost_usd == 0.2  # the failed write was still paid for
-    # The rollback for the second job did not undo the first, committed one.
-    assert sorted(j.state for j in session.scalars(select(Job))) == ["pending_score", "scored"]
-    assert [r.status for r in session.scalars(select(LlmScore))] == ["ok"]
+def test_transient_db_error_is_retried_so_the_paid_result_is_kept(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, profile, _ = _setup(session, 2)
+    cfg = CFG.model_copy(update={"parallelism": 1})
+    _flaky_writes(monkeypatch, {2}, RuntimeError("db went away: private details"))
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    assert (report.ok, report.error, len(scorer.calls)) == (2, 0, 2)
+    assert {j.state for j in session.scalars(select(Job))} == {"scored"}
+    assert [r.status for r in session.scalars(select(LlmScore))] == ["ok", "ok"]
+
+
+def test_broken_db_stops_further_paid_calls(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, profile, _ = _setup(session, 3)
+    cfg = CFG.model_copy(update={"parallelism": 1})
+    _flaky_writes(monkeypatch, set(range(2, 100)), RuntimeError("db went away: private details"))
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    assert (report.ok, report.error, report.skipped_db_error) == (1, 1, 1)
+    assert (len(scorer.calls), report.first_error) == (2, "RuntimeError")
+    assert report.est_cost_usd == 0.2  # the lost write was still paid for
+    # The failed writes did not undo the first, committed job.
+    states = sorted(j.state for j in session.scalars(select(Job)))
+    assert states == ["pending_score", "pending_score", "scored"]
+
+
+def test_conflicting_write_is_not_retried_and_does_not_stop_the_run(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, profile, _ = _setup(session, 3)
+    cfg = CFG.model_copy(update={"parallelism": 1})
+    _flaky_writes(monkeypatch, {1}, IntegrityError("INSERT", {}, Exception("duplicate key")))
+    scorer = _scorer(_ok())
+    report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
+    assert (report.ok, report.error, report.skipped_db_error, len(scorer.calls)) == (2, 1, 0, 3)
+    assert report.first_error == "IntegrityError"
 
 
 def _twins(session: Session) -> tuple[uuid.UUID, Any]:
@@ -289,16 +317,15 @@ def test_runtime_errors_never_park_a_job(session: Session) -> None:
 def test_refusals_count_toward_max_attempts(session: Session) -> None:
     run_id, profile, _ = _setup(session, 1)
     refused = ScoreResult(ScoreStatus.REFUSED, None, 100, 5, 0.01, "{}", "refusal")
-    for _ in range(CFG.max_attempts):
+    for attempt in range(1, CFG.max_attempts + 1):
         report = score_pending(
             session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(refused), now=NOW
         )
-        assert (report.refused, report.parked) == (1, 0)
-    assert session.scalars(select(Job)).one().state == "pending_score"
+        assert (report.refused, report.parked) == (1, int(attempt == CFG.max_attempts))
+    assert session.scalars(select(Job)).one().state == "score_failed"
     scorer = _scorer(refused)
     report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
-    assert (report.parked, report.refused, len(scorer.calls)) == (1, 0, 0)
-    assert session.scalars(select(Job)).one().state == "score_failed"
+    assert (report.parked, report.refused, len(scorer.calls)) == (0, 0, 0)
 
 
 def test_exhausted_cli_structured_retries_park_the_job(session: Session) -> None:
@@ -315,16 +342,15 @@ def test_exhausted_cli_structured_retries_park_the_job(session: Session) -> None
             user_message=message, system_prompt="SP", model="m", timeout_s=1, runner=runner
         )
 
-    for _ in range(CFG.max_attempts):
+    for attempt in range(1, CFG.max_attempts + 1):
         report = score_pending(
             session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW
         )
-        assert (report.invalid_output, report.error, report.parked) == (1, 0, 0)
+        last = int(attempt == CFG.max_attempts)
+        assert (report.invalid_output, report.error, report.parked) == (1, 0, last)
         assert report.first_error == "error_max_structured_output_retries"
     assert len(runner_calls) == CFG.max_attempts  # one paid call per run, never two
-    assert session.scalars(select(Job)).one().state == "pending_score"
-    report = score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
-    assert (report.parked, report.invalid_output) == (1, 0)
+    score_pending(session, run_id=run_id, profile=profile, cfg=CFG, scorer=scorer, now=NOW)
     assert len(runner_calls) == CFG.max_attempts
     assert session.scalars(select(Job)).one().state == "score_failed"
     assert {r.status for r in session.scalars(select(LlmScore))} == {"invalid_output"}

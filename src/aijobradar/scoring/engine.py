@@ -2,10 +2,11 @@
 
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from aijobradar import store
@@ -16,6 +17,8 @@ from aijobradar.scoring.combine import final_score
 from aijobradar.scoring.prompt import input_hash, render_job, user_message
 
 Scorer = Callable[[str], ScoreResult]
+# A transient database error must not throw away a result that was already paid for.
+_WRITE_ATTEMPTS = 2
 
 
 @dataclass
@@ -27,6 +30,8 @@ class ScoringReport:
     error: int = 0
     skipped_budget: int = 0
     parked: int = 0
+    # Jobs not sent to the model because the database stopped accepting paid results.
+    skipped_db_error: int = 0
     est_cost_usd: float = 0.0
     first_error: str | None = None
 
@@ -133,16 +138,26 @@ def score_pending(
     cap = min(cfg.max_items_per_run, limit) if limit is not None else cfg.max_items_per_run
     report.skipped_budget += sum(p.size for p in todo[cap:])
     todo = todo[:cap]
+    db_ok = True
     with ThreadPoolExecutor(max_workers=cfg.parallelism) as pool:
         for start in range(0, len(todo), cfg.parallelism):
+            if not db_ok:
+                # Fail closed: no more paid calls while their results cannot be stored.
+                report.skipped_db_error += sum(p.size for p in todo[start:])
+                break
+            # A soft cap: checked before each wave, so one wave may go past it.
             if report.est_cost_usd >= cfg.max_est_cost_usd_per_run:
                 report.skipped_budget += sum(p.size for p in todo[start:])
                 break
             wave = todo[start : start + cfg.parallelism]
-            # Workers only call the scorer; every database write stays in this thread.
-            results = list(pool.map(lambda p: _safe(scorer, p.message), wave))
-            for pending, result in zip(wave, results, strict=True):
-                _record(session, pending, result, run_id, ver, cfg, now, report)
+            # Workers only call the scorer; every database write stays in this thread, and each
+            # paid result is stored as soon as it arrives, not after the whole wave.
+            futures = {pool.submit(_safe, scorer, p.message): p for p in wave}
+            for future in as_completed(futures):
+                stored = _record(
+                    session, futures[future], future.result(), run_id, ver, cfg, now, report
+                )
+                db_ok = db_ok and stored
     return report
 
 
@@ -155,39 +170,80 @@ def _record(
     cfg: ScoringConfig,
     now: datetime,
     report: ScoringReport,
-) -> None:
+) -> bool:
     report.est_cost_usd = round(report.est_cost_usd + result.est_cost_usd, 6)
     score = final_score(result.axes, cfg) if result.axes is not None else None
-    try:
-        store.record_llm_score(
-            session,
-            job_id=pending.job_id,
-            run_id=run_id,
-            input_hash=pending.key,
-            prompt_version=ver.prompt_version,
-            model=ver.model,
-            profile_version_id=ver.profile_version_id,
-            result=result,
-            final_score=score,
-            now=now,
-        )
-        if result.status is ScoreStatus.OK:
-            for job in (pending.job, *pending.followers):
-                store.set_job_state(session, job, "scored")
-        session.commit()  # a paid result must survive a later failure
-    except Exception as exc:
-        session.rollback()
-        report.error += 1
-        report.first_error = report.first_error or type(exc).__name__
-        return
+    parked = False
+    for attempt in range(_WRITE_ATTEMPTS):
+        try:
+            parked = _write(session, pending, result, score, run_id, ver, cfg, now)
+            break
+        except IntegrityError as exc:
+            # Another writer already stored this key (e.g. a concurrent run): the database works.
+            session.rollback()
+            report.error += 1
+            report.first_error = report.first_error or type(exc).__name__
+            return True
+        except Exception as exc:
+            session.rollback()
+            if attempt + 1 == _WRITE_ATTEMPTS:
+                report.error += 1
+                report.first_error = report.first_error or type(exc).__name__
+                return False
     if result.status is ScoreStatus.OK:
         report.ok += 1
         report.cached += len(pending.followers)
-        return
+        return True
     if result.status is ScoreStatus.INVALID_OUTPUT:
         report.invalid_output += 1
     elif result.status is ScoreStatus.REFUSED:
         report.refused += 1
     else:
         report.error += 1
+    if parked:
+        report.parked += pending.size
     report.first_error = report.first_error or result.error
+    return True
+
+
+def _write(
+    session: Session,
+    pending: _Pending,
+    result: ScoreResult,
+    score: float | None,
+    run_id: uuid.UUID,
+    ver: _Key,
+    cfg: ScoringConfig,
+    now: datetime,
+) -> bool:
+    """Store one paid result in its own transaction; True if the job was parked by it."""
+    store.record_llm_score(
+        session,
+        job_id=pending.job_id,
+        run_id=run_id,
+        input_hash=pending.key,
+        prompt_version=ver.prompt_version,
+        model=ver.model,
+        profile_version_id=ver.profile_version_id,
+        result=result,
+        final_score=score,
+        now=now,
+    )
+    state: str | None = None
+    if result.status is ScoreStatus.OK:
+        state = "scored"
+    elif result.status in (ScoreStatus.INVALID_OUTPUT, ScoreStatus.REFUSED):
+        failed = store.count_failed_attempts(
+            session,
+            input_hash=pending.key,
+            prompt_version=ver.prompt_version,
+            model=ver.model,
+            profile_version_id=ver.profile_version_id,
+        )
+        if failed >= cfg.max_attempts:
+            state = "score_failed"  # park now, not one run later
+    if state is not None:
+        for job in (pending.job, *pending.followers):
+            store.set_job_state(session, job, state)
+    session.commit()  # a paid result must survive a later failure
+    return state == "score_failed"
