@@ -3,9 +3,10 @@
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,8 @@ from aijobradar.models import RawJob, SourceResult
 from aijobradar.normalize import NormalizedJob
 
 if TYPE_CHECKING:
+    from sqlalchemy import CursorResult
+
     from aijobradar.scoring.claude_cli import ScoreResult
 
 
@@ -220,6 +223,29 @@ def record_rule_decision(
 def set_job_state(session: Session, job: Job, state: str) -> None:
     job.state = state
     session.flush()
+
+
+def reopen_rejected_from_other_versions(session: Session, current_version: str) -> int:
+    """Rejections are final per rules version; a new version deserves a second look.
+
+    Only the latest rule decision of a job counts. A rejected job with no rule decision at all
+    has no version to compare and is left alone.
+    """
+    latest = (
+        select(RuleDecision.job_id, RuleDecision.rules_version)
+        .ext(distinct_on(RuleDecision.job_id))
+        .order_by(RuleDecision.job_id, RuleDecision.decided_at.desc(), RuleDecision.id.desc())
+        .subquery()
+    )
+    stale = select(latest.c.job_id).where(latest.c.rules_version != current_version)
+    result = session.execute(
+        update(Job)
+        .where(Job.state == "rejected", Job.id.in_(stale))
+        .values(state="new")
+        .execution_options(synchronize_session="fetch")  # loaded Job objects see the new state
+    )
+    session.flush()
+    return cast("CursorResult[Any]", result).rowcount or 0
 
 
 def add_review_item(

@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from aijobradar import store
 from aijobradar.cli import app
-from aijobradar.config import ScoringConfig
+from aijobradar.config import ScoringConfig, load_rules_config
 from aijobradar.db.models import Base, Job, LlmScore, Run
 from aijobradar.models import RawJob
 from aijobradar.normalize import normalize
@@ -81,6 +81,13 @@ def test_run_with_missing_rules_file_exits_2(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app, ["run", "--profile", str(profile), "--rules", str(tmp_path / "nope.yaml")]
     )
+    assert result.exit_code == 2
+    assert "Ошибка в файле правил" in result.output
+    assert "файл не найден" in result.output
+
+
+def test_rules_recheck_with_missing_rules_exits_2(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["rules", "recheck", "--rules", str(tmp_path / "nope.yaml")])
     assert result.exit_code == 2
     assert "Ошибка в файле правил" in result.output
     assert "файл не найден" in result.output
@@ -412,3 +419,37 @@ def test_run_with_missing_scoring_prompt_exits_2(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["run", "--profile", str(profile), "--scoring", str(scoring)])
     assert result.exit_code == 2
     assert "промпт" in result.output
+
+
+def test_rules_recheck_reopens_rejections_of_other_rules_versions(cli_db: Engine) -> None:
+    current = load_rules_config(ROOT / "config" / "rules.yaml").version
+    with Session(cli_db) as session, session.begin():
+        run = store.start_run(session, "seed", NOW)
+        for sid, version in (("old", f"not-{current}"), ("cur", current)):
+            raw = RawJob(
+                source="s",
+                source_job_id=sid,
+                source_url=f"https://seed.example/{sid}",
+                title=f"Recheck Engineer {sid}",
+                company=f"Recheck Company {sid}",
+            )
+            job = store.insert_job(session, normalize(raw), run.id, NOW)
+            store.record_rule_decision(
+                session,
+                job_id=job.id,
+                run_id=run.id,
+                rules_version=version,
+                hits={"R-STALE": "x"},
+                now=NOW,
+            )
+            store.set_job_state(session, job, "rejected")
+    # No personal profile file is passed or needed: the command reads only the rules version.
+    result = CliRunner().invoke(
+        app, ["rules", "recheck", "--rules", str(ROOT / "config/rules.yaml")]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "Вернул на проверку правилами: 1."
+    assert _states(cli_db) == ["new", "rejected"]
+    with Session(cli_db) as session:
+        by_title = {j.title_raw: j.state for j in session.scalars(select(Job))}
+    assert by_title == {"Recheck Engineer old": "new", "Recheck Engineer cur": "rejected"}

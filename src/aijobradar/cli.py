@@ -10,7 +10,7 @@ from pydantic import ValidationError
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
-    from aijobradar.config import ScoringConfig
+    from aijobradar.config import RulesConfig, ScoringConfig
     from aijobradar.pipeline import FetchReport
     from aijobradar.scoring.engine import Scorer, ScoringReport
 
@@ -19,6 +19,8 @@ db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 app.add_typer(db_app, name="db")
 profile_app = typer.Typer(no_args_is_help=True, help="Candidate profile (resume and targets).")
 app.add_typer(profile_app, name="profile")
+rules_app = typer.Typer(no_args_is_help=True, help="Deterministic pre-LLM rules.")
+app.add_typer(rules_app, name="rules")
 
 
 def _validation_details(exc: ValidationError) -> str:
@@ -63,6 +65,23 @@ def _load_scoring(scoring_path: Path) -> "tuple[ScoringConfig, str]":
         typer.echo(f"Не удалось прочитать системный промпт {prompt_path}", err=True)
         raise typer.Exit(2) from None
     return cfg, prompt
+
+
+def _load_rules_cfg(rules: Path) -> "RulesConfig":
+    """Rules config; errors name the file and fields, never contents."""
+    from aijobradar.config import load_rules_config
+
+    try:
+        return load_rules_config(rules)
+    except FileNotFoundError:
+        typer.echo(f"Ошибка в файле правил {rules}: файл не найден", err=True)
+        raise typer.Exit(2) from None
+    except ValidationError as exc:
+        typer.echo(f"Ошибка в файле правил {rules}: {_validation_details(exc)}", err=True)
+        raise typer.Exit(2) from None
+    except yaml.YAMLError:
+        typer.echo(f"Ошибка в файле правил {rules}: не YAML", err=True)
+        raise typer.Exit(2) from None
 
 
 def _latest_profile_id(engine: "Engine") -> int:
@@ -189,7 +208,7 @@ def run(
 
     from sqlalchemy.orm import Session
 
-    from aijobradar.config import Settings, load_config, load_rules_config
+    from aijobradar.config import Settings, load_config
     from aijobradar.db.session import make_engine
     from aijobradar.pipeline import RunStatus, format_report, run_fetch
     from aijobradar.profile import ProfileMissing, load_profile
@@ -214,17 +233,7 @@ def run(
             err=True,
         )
         raise typer.Exit(2) from None
-    try:
-        rules_cfg = load_rules_config(rules)
-    except FileNotFoundError:
-        typer.echo(f"Ошибка в файле правил {rules}: файл не найден", err=True)
-        raise typer.Exit(2) from None
-    except ValidationError as exc:
-        typer.echo(f"Ошибка в файле правил {rules}: {_validation_details(exc)}", err=True)
-        raise typer.Exit(2) from None
-    except yaml.YAMLError:
-        typer.echo(f"Ошибка в файле правил {rules}: не YAML", err=True)
-        raise typer.Exit(2) from None
+    rules_cfg = _load_rules_cfg(rules)
     try:
         rules_ctx = build_rule_context(rules_cfg, candidate, now)
     except ValueError as exc:
@@ -311,6 +320,25 @@ def score(
         if run_row is not None:
             store.finish_run(session, run_row, status, scoring_counts(report), datetime.now(UTC))
     typer.echo(format_scoring_line(report))
+
+
+@rules_app.command("recheck")
+def rules_recheck(
+    rules: Path = typer.Option(Path("config/rules.yaml"), help="Rules config (YAML)."),
+) -> None:
+    """Send jobs rejected under another rules version back for a fresh rules check."""
+    from sqlalchemy.orm import Session
+
+    from aijobradar import store
+    from aijobradar.config import Settings
+    from aijobradar.db.session import make_engine
+
+    # Only the version is needed: no personal profile file is read.
+    version = _load_rules_cfg(rules).version
+    engine = make_engine(Settings().sqlalchemy_url)
+    with Session(engine) as session, session.begin():
+        reopened = store.reopen_rejected_from_other_versions(session, version)
+    typer.echo(f"Вернул на проверку правилами: {reopened}.")
 
 
 @db_app.command("upgrade")
