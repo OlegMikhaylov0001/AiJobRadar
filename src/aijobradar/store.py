@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from aijobradar.db.models import (
     Job,
     JobSource,
+    LlmScore,
     ProfileVersion,
     ReviewItem,
     RuleDecision,
@@ -19,6 +21,9 @@ from aijobradar.db.models import (
 from aijobradar.dedup import Candidate
 from aijobradar.models import RawJob, SourceResult
 from aijobradar.normalize import NormalizedJob
+
+if TYPE_CHECKING:
+    from aijobradar.scoring.claude_cli import ScoreResult
 
 
 def start_run(session: Session, kind: str, now: datetime) -> Run:
@@ -233,3 +238,78 @@ def add_profile_version(
     session.add(version)
     session.flush()
     return version, True
+
+
+def _score_key(input_hash: str, prompt_version: str, model: str, profile_version_id: int) -> Any:
+    return (
+        (LlmScore.input_hash == input_hash)
+        & (LlmScore.prompt_version == prompt_version)
+        & (LlmScore.model == model)
+        & (LlmScore.profile_version_id == profile_version_id)
+    )
+
+
+def find_ok_score(
+    session: Session, *, input_hash: str, prompt_version: str, model: str, profile_version_id: int
+) -> LlmScore | None:
+    return session.scalars(
+        select(LlmScore).where(
+            _score_key(input_hash, prompt_version, model, profile_version_id),
+            LlmScore.status == "ok",
+        )
+    ).first()
+
+
+def count_failed_attempts(
+    session: Session, *, input_hash: str, prompt_version: str, model: str, profile_version_id: int
+) -> int:
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(LlmScore)
+            .where(
+                _score_key(input_hash, prompt_version, model, profile_version_id),
+                LlmScore.status != "ok",
+            )
+        )
+        or 0
+    )
+
+
+def record_llm_score(
+    session: Session,
+    *,
+    job_id: uuid.UUID,
+    run_id: uuid.UUID,
+    input_hash: str,
+    prompt_version: str,
+    model: str,
+    profile_version_id: int,
+    result: "ScoreResult",
+    final_score: float | None,
+    now: datetime,
+) -> None:
+    axes = result.axes
+    session.add(
+        LlmScore(
+            job_id=job_id,
+            run_id=run_id,
+            input_hash=input_hash,
+            prompt_version=prompt_version,
+            model=model,
+            profile_version_id=profile_version_id,
+            status=result.status.value,
+            axes=axes.model_dump(exclude={"why_fit", "main_risk", "gaps"}) if axes else None,
+            final_score=final_score,
+            why_fit=axes.why_fit if axes else None,
+            main_risk=axes.main_risk if axes else None,
+            gaps=axes.gaps if axes else None,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            est_cost_usd=result.est_cost_usd,
+            raw_output=result.raw_output,
+            error=result.error,
+            scored_at=now,
+        )
+    )
+    session.flush()
