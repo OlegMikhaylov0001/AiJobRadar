@@ -58,6 +58,9 @@ uv run aijobradar db upgrade
 uv run aijobradar profile import private/resume.md private/targets.md
 ```
 
+Импорт профиля в Neon (`profile import`) обязателен до первого `run --deliver`: без профиля в БД
+оценка останавливается с ошибкой «Нет профиля в БД».
+
 Дальше `daily.yml` сам применяет миграции (`db upgrade`) перед каждым прогоном.
 
 ### Ручной запуск

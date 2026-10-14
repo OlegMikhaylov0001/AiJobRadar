@@ -22,11 +22,6 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -37,12 +32,20 @@ jobs:
         env:
           PROFILE_YAML: ${{ secrets.PROFILE_YAML }}
         run: |
-          mkdir -p private
+          [ -n "$PROFILE_YAML" ] || { echo "PROFILE_YAML secret is empty" >&2; exit 1; }
           umask 077
+          mkdir -p private
           printf '%s\n' "$PROFILE_YAML" > private/profile.yaml
-      - run: uv run aijobradar db upgrade
+      - name: Apply migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: uv run aijobradar db upgrade
       - name: Fetch, rules, score, deliver
         env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           LIMIT: ${{ inputs.limit }}
         run: uv run aijobradar run --deliver ${LIMIT:+--limit "$LIMIT"}
       - name: Keepalive (scheduled workflows stop after 60 days without repo activity)
