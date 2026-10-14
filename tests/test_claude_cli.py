@@ -194,3 +194,13 @@ def test_long_subtype_is_cut() -> None:
     envelope["subtype"] = "x" * 500
     runner, _ = _runner(json.dumps(envelope))
     assert _score(runner).error == "x" * 100
+
+
+def test_api_error_reports_reason_and_status_not_text() -> None:
+    envelope = json.loads(_envelope("error.json"))
+    envelope.update(
+        subtype="success", terminal_reason="api_error", api_error_status=400, result="job text"
+    )
+    runner, _ = _runner(json.dumps(envelope))
+    result = _score(runner)
+    assert (result.status, result.error) == (ScoreStatus.ERROR, "api_error 400")

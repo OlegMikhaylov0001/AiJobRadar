@@ -249,3 +249,14 @@ def test_zero_cost_cap_calls_nothing(session: Session) -> None:
     scorer = _scorer(_ok())
     report = score_pending(session, run_id=run_id, profile=profile, cfg=cfg, scorer=scorer, now=NOW)
     assert (len(scorer.calls), report.skipped_budget) == (0, 2)
+
+
+def test_runtime_errors_never_park_a_job(session: Session) -> None:
+    run_id, profile, _ = _setup(session, 1)
+    broken = ScoreResult(ScoreStatus.ERROR, None, 0, 0, 0.0, "{}", "api_error 400")
+    for _ in range(CFG.max_attempts + 1):
+        report = score_pending(
+            session, run_id=run_id, profile=profile, cfg=CFG, scorer=_scorer(broken), now=NOW
+        )
+        assert (report.error, report.parked) == (1, 0)
+    assert session.scalars(select(Job)).one().state == "pending_score"

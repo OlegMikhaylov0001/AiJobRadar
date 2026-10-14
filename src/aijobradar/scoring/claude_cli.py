@@ -70,6 +70,14 @@ def _fields(exc: ValidationError) -> str:
     ]
 
 
+def _cli_error(envelope: dict[str, Any]) -> str:
+    # CLI-made identifiers only (never `result`, which may echo our input). On API errors the
+    # CLI reports subtype "success"; terminal_reason and the HTTP status say what happened.
+    reason = str(envelope.get("terminal_reason") or envelope.get("subtype") or "is_error")[:100]
+    status = envelope.get("api_error_status")
+    return f"{reason} {status}" if isinstance(status, int) else reason
+
+
 def _count(value: Any) -> int:
     # The envelope is external input: a malformed number counts as zero, never crashes the run.
     try:
@@ -161,7 +169,7 @@ def score(
                 tokens_out,
                 cost,
                 raw,
-                str(envelope.get("subtype") or "is_error")[:100],
+                _cli_error(envelope),
             )
         try:
             axes = ScoreAxes.model_validate(envelope.get("structured_output"))

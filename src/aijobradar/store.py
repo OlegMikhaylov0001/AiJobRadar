@@ -308,7 +308,9 @@ def count_failed_attempts(
             .select_from(LlmScore)
             .where(
                 _score_key(input_hash, prompt_version, model, profile_version_id),
-                LlmScore.status != "ok",
+                # Only answers the model gave and failed count against the job; a timeout or
+                # an outdated CLI is not the job's fault and must not park it.
+                LlmScore.status.in_(("invalid_output", "refused")),
             )
         )
         or 0
