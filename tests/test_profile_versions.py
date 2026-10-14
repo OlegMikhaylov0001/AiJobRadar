@@ -25,6 +25,7 @@ def test_same_text_does_not_create_a_new_version(session: Session) -> None:
         session, resume_md="# R", targets_md="# T", note="x", now=NOW + timedelta(hours=1)
     )
     assert not created and again.id == first.id
+    assert again.note is None
     assert len(session.scalars(select(ProfileVersion)).all()) == 1
 
 

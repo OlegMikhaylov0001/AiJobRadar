@@ -77,3 +77,14 @@ def test_profile_import_empty_file_exits_2(tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["profile", "import", str(resume), str(targets)])
     assert result.exit_code == 2
     assert "пуст" in result.output
+
+
+def test_profile_import_non_utf8_file_exits_2_without_traceback(tmp_path: Path) -> None:
+    resume, targets = tmp_path / "resume.md", tmp_path / "targets.md"
+    resume.write_bytes(b"\xff\xfe\xfa")
+    targets.write_text("# T")
+    result = CliRunner().invoke(app, ["profile", "import", str(resume), str(targets)])
+    assert result.exit_code == 2
+    assert f"Не удалось прочитать {resume}" in result.output
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, UnicodeDecodeError)

@@ -114,7 +114,11 @@ def _read_profile_doc(path: Path) -> str:
     if not path.is_file():
         typer.echo(f"Нет файла {path}.", err=True)
         raise typer.Exit(2)
-    text = path.read_text(encoding="utf-8").strip()
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        typer.echo(f"Не удалось прочитать {path}.", err=True)
+        raise typer.Exit(2) from None
     if not text:
         typer.echo(f"Файл {path} пуст.", err=True)
         raise typer.Exit(2)
