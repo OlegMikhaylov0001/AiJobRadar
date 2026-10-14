@@ -92,3 +92,84 @@ def test_get_updates_and_answer_callback() -> None:
     assert client.get_updates(5) == [{"update_id": 5}]
     client.answer_callback("cb-1", "Записал")
     assert answer.called
+
+
+@respx.mock
+def test_5xx_is_retried_then_succeeds() -> None:
+    respx.post(f"{BASE}/sendMessage").mock(
+        side_effect=[
+            httpx.Response(500, json={"ok": False}),
+            httpx.Response(200, json={"ok": True, "result": {"message_id": 9}}),
+        ]
+    )
+    sleeps: list[float] = []
+    assert _client(sleeps).send_message("42", "x") == 9
+    assert sleeps == [1.0]
+
+
+@respx.mock
+def test_5xx_exhaustion_fails_after_three_attempts() -> None:
+    route = respx.post(f"{BASE}/sendMessage").mock(
+        side_effect=[httpx.Response(502, json={"ok": False})] * 3
+    )
+    sleeps: list[float] = []
+    with pytest.raises(TelegramError) as info:
+        _client(sleeps).send_message("42", "x")
+    assert route.call_count == 3 and len(sleeps) == 2
+    assert str(info.value) == "sendMessage: HTTP 502"
+
+
+@pytest.mark.parametrize(("retry_after", "expected"), [(-5, 0.0), (10_000, 60.0)])
+@respx.mock
+def test_retry_after_is_clamped(retry_after: int, expected: float) -> None:
+    respx.post(f"{BASE}/sendMessage").mock(
+        side_effect=[
+            httpx.Response(429, json={"ok": False, "parameters": {"retry_after": retry_after}}),
+            httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}),
+        ]
+    )
+    sleeps: list[float] = []
+    assert _client(sleeps).send_message("42", "x") == 1
+    assert sleeps == [expected]
+
+
+@pytest.mark.parametrize(
+    "result", [None, {}, {"message_id": True}, {"message_id": "77"}, 5], ids=repr
+)
+@respx.mock
+def test_send_message_rejects_bad_result_shape(result: object) -> None:
+    respx.post(f"{BASE}/sendMessage").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": result})
+    )
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert str(info.value) == "sendMessage: bad response"
+
+
+@pytest.mark.parametrize("result", [5, {}, None], ids=repr)
+@respx.mock
+def test_get_updates_rejects_non_list_result(result: object) -> None:
+    respx.post(f"{BASE}/getUpdates").mock(
+        return_value=httpx.Response(200, json={"ok": True, "result": result})
+    )
+    with pytest.raises(TelegramError) as info:
+        _client([]).get_updates(0)
+    assert str(info.value) == "getUpdates: bad response"
+
+
+@pytest.mark.parametrize("body", [[1], "x"], ids=repr)
+@respx.mock
+def test_non_object_json_body_is_telegram_error(body: object) -> None:
+    respx.post(f"{BASE}/sendMessage").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert str(info.value) == "sendMessage: HTTP 200"
+
+
+@respx.mock
+def test_invalid_url_is_telegram_error_without_token() -> None:
+    respx.post(f"{BASE}/sendMessage").mock(side_effect=httpx.InvalidURL("bad " + BASE))
+    with pytest.raises(TelegramError) as info:
+        _client([]).send_message("42", "x")
+    assert str(info.value) == "sendMessage: InvalidURL"
+    assert TOKEN not in repr(info.value) and info.value.__cause__ is None

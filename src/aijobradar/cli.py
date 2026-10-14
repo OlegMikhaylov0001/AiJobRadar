@@ -14,7 +14,12 @@ if TYPE_CHECKING:
     from aijobradar.pipeline import FetchReport
     from aijobradar.scoring.engine import Scorer, ScoringReport
 
-app = typer.Typer(no_args_is_help=True, help="AiJobRadar: personal remote-job monitor.")
+# Locals in pretty tracebacks could print the Telegram URL, token included.
+app = typer.Typer(
+    no_args_is_help=True,
+    help="AiJobRadar: personal remote-job monitor.",
+    pretty_exceptions_show_locals=False,
+)
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 app.add_typer(db_app, name="db")
 profile_app = typer.Typer(no_args_is_help=True, help="Candidate profile (resume and targets).")
